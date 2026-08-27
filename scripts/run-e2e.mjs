@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 
-const baseUrl = "http://127.0.0.1:3000";
+const e2ePort = process.env.UPGRADEPILOT_E2E_PORT ?? "3100";
+const baseUrl = `http://127.0.0.1:${e2ePort}`;
 const startupTimeoutMs = 120_000;
 
 const server = spawn(
   process.execPath,
-  ["node_modules/next/dist/bin/next", "start", "--hostname", "127.0.0.1", "--port", "3000"],
+  ["node_modules/next/dist/bin/next", "start", "--hostname", "127.0.0.1", "--port", e2ePort],
   {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true

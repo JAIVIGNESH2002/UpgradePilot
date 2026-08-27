@@ -18,7 +18,33 @@ test-results
 
 # env
 .env
+.env.*
 .env*.local
+!.env.example
+
+# secrets and credentials
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.secrets.*
+secrets.*
+credentials.*
+service-account*.json
+*.service-account.json
+.npmrc
+.yarnrc
+.pnpmrc
+*token*
 
 # logs
 npm-debug.log*
@@ -28,4 +54,3 @@ pnpm-debug.log*
 
 # misc
 .DS_Store
-*.pem
