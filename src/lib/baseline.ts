@@ -14,6 +14,10 @@ export type SandboxWorkspace = {
 
 export type SandboxProvider = {
   createWorkspace(input: { repositoryUrl: string }): Promise<SandboxWorkspace>;
+  runBaseline?(input: {
+    repositoryUrl: string;
+    scripts: Record<string, string>;
+  }): Promise<BaselineVerificationResult>;
 };
 
 export type BaselineVerificationInput = {
@@ -27,6 +31,10 @@ export async function runBaselineVerification({
   scripts,
   sandboxProvider
 }: BaselineVerificationInput): Promise<BaselineVerificationResult> {
+  if (sandboxProvider.runBaseline) {
+    return sandboxProvider.runBaseline({ repositoryUrl, scripts });
+  }
+
   const workspace = await sandboxProvider.createWorkspace({ repositoryUrl });
   const install = await runWorkspaceCommand(workspace, "npm ci");
 
