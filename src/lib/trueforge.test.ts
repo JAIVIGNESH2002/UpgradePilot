@@ -79,6 +79,54 @@ describe("TrueForgeClient", () => {
 
     await expect(client.getDefaultModelName()).resolves.toBe("google-gemini/gemini-3-6-flash");
   });
+
+  it("retries localhost requests against 127.0.0.1 when the first connection fails", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+
+      if (href === "http://localhost:8790/healthz") {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ECONNREFUSED" }
+        });
+      }
+
+      if (href === "http://127.0.0.1:8790/healthz") {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://localhost:8790",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(client.getHealth()).resolves.toEqual({
+      status: "ok",
+      version: "0.2.0-rc.0"
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:8790/healthz",
+      expect.objectContaining({ cache: "no-store" })
+    );
+  });
+
+  it("reports refused TrueForge connections with setup guidance", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: { code: "ECONNREFUSED" }
+      });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://localhost:8790",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(client.getHealth()).rejects.toThrow(
+      "TrueForge is not reachable at TRUEFORGE_BASE_URL (http://localhost:8790)."
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("TrueForgeSandboxProvider", () => {

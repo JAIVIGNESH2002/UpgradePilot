@@ -172,6 +172,33 @@ describe("repository workspace helpers", () => {
         ...repository,
         package: {
           ...repository.package,
+          dependencies: [
+            {
+              packageName: "eslint",
+              currentVersion: "^9.0.0",
+              resolvedVersion: "9.39.4",
+              kind: "devDependency"
+            }
+          ]
+        },
+        dependencyVersions: {
+          eslint: {
+            packageName: "eslint",
+            latestVersion: null,
+            currentComparableVersion: "9.39.4",
+            changeType: "unavailable",
+            lookupStatus: "unavailable",
+            reason: "Latest version has not been checked."
+          }
+        }
+      })
+    ).toBe(true);
+
+    expect(
+      repositoryNeedsInspectionRefresh({
+        ...repository,
+        package: {
+          ...repository.package,
           packageManager: {
             ...repository.package.packageManager,
             lockfile: null

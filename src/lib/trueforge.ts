@@ -128,7 +128,7 @@ export class TrueForgeClient {
   }
 
   async getSandboxProviderStatus(): Promise<TrueForgeSandboxProviderStatus | null> {
-    const response = await this.fetchImpl(this.url("/api/v1/settings/sandbox-providers"), {
+    const response = await this.fetchTrueForge("/api/v1/settings/sandbox-providers", {
       cache: "no-store"
     });
 
@@ -336,7 +336,7 @@ export class TrueForgeClient {
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.fetchImpl(this.url(path), {
+    const response = await this.fetchTrueForge(path, {
       headers: {
         Accept: "application/json"
       },
@@ -351,7 +351,7 @@ export class TrueForgeClient {
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const response = await this.fetchImpl(this.url(path), {
+    const response = await this.fetchTrueForge(path, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -368,6 +368,31 @@ export class TrueForgeClient {
     }
 
     return response.json() as Promise<T>;
+  }
+
+  private async fetchTrueForge(path: string, init: RequestInit): Promise<Response> {
+    const primaryUrl = this.url(path);
+
+    try {
+      return await this.fetchImpl(primaryUrl, init);
+    } catch (error) {
+      const fallbackUrl = localhostFallbackUrl(primaryUrl);
+
+      if (fallbackUrl !== null) {
+        try {
+          return await this.fetchImpl(fallbackUrl, init);
+        } catch (fallbackError) {
+          throw new TrueForgeIntegrationError(
+            describeTrueForgeNetworkFailure(fallbackError, this.baseUrl),
+            { cause: fallbackError }
+          );
+        }
+      }
+
+      throw new TrueForgeIntegrationError(describeTrueForgeNetworkFailure(error, this.baseUrl), {
+        cause: error
+      });
+    }
   }
 
   private url(path: string): string {
@@ -416,6 +441,60 @@ export class TrueForgeSandboxProvider implements SandboxProvider {
 
 function normalizeBaseUrl(input: string): string {
   return input.endsWith("/") ? input.slice(0, -1) : input;
+}
+
+function localhostFallbackUrl(input: string): string | null {
+  const url = new URL(input);
+
+  if (url.hostname !== "localhost") {
+    return null;
+  }
+
+  url.hostname = "127.0.0.1";
+
+  return url.toString();
+}
+
+function describeTrueForgeNetworkFailure(error: unknown, baseUrl: string): string {
+  const causeCode = networkCauseCode(error);
+
+  if (causeCode === "EACCES") {
+    return `The UpgradePilot server could not reach TrueForge at TRUEFORGE_BASE_URL (${baseUrl}) because local network access is blocked for this process.`;
+  }
+
+  if (causeCode === "ECONNREFUSED") {
+    return `TrueForge is not reachable at TRUEFORGE_BASE_URL (${baseUrl}). Confirm the patched TrueForge service is running and listening on that URL.`;
+  }
+
+  if (causeCode === "ENOTFOUND") {
+    return `The UpgradePilot server could not resolve TRUEFORGE_BASE_URL (${baseUrl}). Check the configured host name.`;
+  }
+
+  if (causeCode === "ETIMEDOUT") {
+    return `The UpgradePilot server timed out while connecting to TrueForge at TRUEFORGE_BASE_URL (${baseUrl}).`;
+  }
+
+  return error instanceof Error
+    ? `The UpgradePilot server could not fetch data from TrueForge at TRUEFORGE_BASE_URL (${baseUrl}): ${error.message}.`
+    : `The UpgradePilot server could not fetch data from TrueForge at TRUEFORGE_BASE_URL (${baseUrl}).`;
+}
+
+function networkCauseCode(error: unknown): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+
+  if ("code" in error && error.code !== undefined) {
+    return String(error.code);
+  }
+
+  const cause = error.cause;
+
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    return String(cause.code);
+  }
+
+  return undefined;
 }
 
 function mapBaselineWorkflowResult(
