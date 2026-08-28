@@ -31,6 +31,29 @@ function result(command: string, exitCode: number): CommandResult {
 }
 
 describe("runBaselineVerification", () => {
+  it("delegates to provider-level baseline workflows when available", async () => {
+    const baseline = await runBaselineVerification({
+      repositoryUrl: "https://github.com/acme/provider-flow",
+      scripts: { test: "vitest run" },
+      sandboxProvider: {
+        async createWorkspace() {
+          throw new Error("createWorkspace should not be called");
+        },
+        async runBaseline() {
+          return {
+            status: "PASSED",
+            install: result("npm ci", 0),
+            verification: [result("npm run test", 0)],
+            skippedScripts: ["format:check", "lint", "typecheck", "build"]
+          };
+        }
+      }
+    });
+
+    expect(baseline.status).toBe("PASSED");
+    expect(baseline.verification).toHaveLength(1);
+  });
+
   it("stops after an install failure", async () => {
     await expect(
       runBaselineVerification({
