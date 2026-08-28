@@ -30,9 +30,24 @@ export async function inspectPublicNpmRepository(
     "package-lock.json",
     metadata.defaultBranch
   );
+  const pnpmLockText = await client.getRepositoryFileText(
+    ref,
+    "pnpm-lock.yaml",
+    metadata.defaultBranch
+  );
+  const yarnLockText = await client.getRepositoryFileText(ref, "yarn.lock", metadata.defaultBranch);
+  const bunLockText =
+    (await client.getRepositoryFileText(ref, "bun.lock", metadata.defaultBranch)) ??
+    (await client.getRepositoryFileText(ref, "bun.lockb", metadata.defaultBranch));
 
   return {
     metadata,
-    package: inspectPackageFiles({ packageJsonText, packageLockText })
+    package: inspectPackageFiles({
+      packageJsonText,
+      packageLockText,
+      pnpmLockText,
+      yarnLockText,
+      bunLockText
+    })
   };
 }

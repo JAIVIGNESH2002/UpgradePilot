@@ -7,6 +7,7 @@ export type GitHubRepositoryRef = {
 export type GitHubRepositoryMetadata = GitHubRepositoryRef & {
   description: string | null;
   defaultBranch: string;
+  language: string | null;
   updatedAt: string;
 };
 
@@ -19,6 +20,7 @@ type GitHubRepositoryApiResponse = {
   html_url: string;
   description: string | null;
   default_branch: string;
+  language: string | null;
   updated_at: string;
 };
 
@@ -80,6 +82,7 @@ export class GitHubClient {
       url: response.html_url,
       description: response.description,
       defaultBranch: response.default_branch,
+      language: response.language,
       updatedAt: response.updated_at
     };
   }
@@ -99,6 +102,43 @@ export class GitHubClient {
 
     const response = await this.fetchGitHub(url, {
       headers: this.headers({ accept: "application/vnd.github.raw" }),
+      cache: "no-store"
+    });
+
+    if (response.status === 404) {
+      return this.getRawRepositoryFileText(ref, path, branch);
+    }
+
+    if (!response.ok) {
+      const rawText = await this.getRawRepositoryFileText(ref, path, branch);
+
+      if (rawText !== null) {
+        return rawText;
+      }
+
+      throw new GitHubRepositoryError(`GitHub returned ${response.status} while fetching ${path}.`);
+    }
+
+    return response.text();
+  }
+
+  private async getRawRepositoryFileText(
+    ref: GitHubRepositoryRef,
+    path: string,
+    branch: string
+  ): Promise<string | null> {
+    const encodedPath = path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const url = `https://raw.githubusercontent.com/${encodeURIComponent(
+      ref.owner
+    )}/${encodeURIComponent(ref.name)}/${encodeURIComponent(branch)}/${encodedPath}`;
+    const response = await this.fetchGitHub(url, {
+      headers: {
+        Accept: "text/plain",
+        "User-Agent": "UpgradePilot"
+      },
       cache: "no-store"
     });
 

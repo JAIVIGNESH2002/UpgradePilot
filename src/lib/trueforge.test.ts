@@ -205,7 +205,8 @@ describe("TrueForgeSandboxProvider", () => {
 
     const result = await provider.runBaseline({
       repositoryUrl: "https://github.com/acme/demo",
-      scripts: { test: "vitest run" }
+      scripts: { test: "vitest run" },
+      packageManager: "npm"
     });
 
     expect(result.status).toBe("PASSED");

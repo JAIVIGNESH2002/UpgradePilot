@@ -1,8 +1,16 @@
 import { VERIFICATION_SCRIPT_ORDER } from "@/lib/verification";
+import type { VerificationPackageManager } from "@/lib/verification";
 
 export const UPGRADEPILOT_BASELINE_RESULT_MARKER = "UPGRADEPILOT_BASELINE_RESULT";
 
-export function buildNpmBaselineWorkflowScript(repositoryUrl: string): string {
+export function buildNpmBaselineWorkflowScript(
+  repositoryUrl: string,
+  packageManager: VerificationPackageManager = "npm"
+): string {
+  const installCommand =
+    packageManager === "pnpm" ? ["pnpm", "install", "--frozen-lockfile"] : ["npm", "ci"];
+  const scriptRunner = packageManager === "pnpm" ? "pnpm" : "npm";
+
   return `
 const { spawn } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync } = require("node:fs");
@@ -11,6 +19,8 @@ const { join } = require("node:path");
 
 const repositoryUrl = ${JSON.stringify(repositoryUrl)};
 const verificationScriptOrder = ${JSON.stringify([...VERIFICATION_SCRIPT_ORDER])};
+const installCommand = ${JSON.stringify(installCommand)};
+const scriptRunner = ${JSON.stringify(scriptRunner)};
 
 function now() {
   return Date.now();
@@ -72,6 +82,7 @@ async function main() {
     runtime: {
       node: process.version,
       npm: null,
+      pnpm: null,
       requiredNode: null,
       packageManager: null,
       hasPackageLock: false,
@@ -88,6 +99,10 @@ async function main() {
 
   const npmVersion = await run("npm", ["--version"], { cwd: workdir });
   result.runtime.npm = npmVersion.output;
+  if (scriptRunner === "pnpm") {
+    const pnpmVersion = await run("pnpm", ["--version"], { cwd: workdir });
+    result.runtime.pnpm = pnpmVersion.output;
+  }
 
   if (clone.exitCode !== 0) {
     printResult(result);
@@ -122,7 +137,7 @@ async function main() {
     result.runtime.lockfileVersion = readJson(packageLockPath).lockfileVersion ?? null;
   }
 
-  const install = await run("npm", ["ci"], { cwd: repoDir });
+  const install = await run(installCommand[0], installCommand.slice(1), { cwd: repoDir });
   result.commands.push(install);
 
   if (install.exitCode === 0) {
@@ -134,7 +149,7 @@ async function main() {
     );
 
     for (const scriptName of result.package.discoveredScripts) {
-      result.commands.push(await run("npm", ["run", scriptName], { cwd: repoDir }));
+      result.commands.push(await run(scriptRunner, ["run", scriptName], { cwd: repoDir }));
     }
   }
 
@@ -168,8 +183,11 @@ main().catch((error) => {
 `.trim();
 }
 
-export function buildNpmBaselineTurnPrompt(repositoryUrl: string): string {
-  const script = buildNpmBaselineWorkflowScript(repositoryUrl);
+export function buildNpmBaselineTurnPrompt(
+  repositoryUrl: string,
+  packageManager: VerificationPackageManager = "npm"
+): string {
+  const script = buildNpmBaselineWorkflowScript(repositoryUrl, packageManager);
 
   return [
     "Run UpgradePilot npm baseline verification for this public GitHub repository:",

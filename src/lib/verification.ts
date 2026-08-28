@@ -8,6 +8,7 @@ export const VERIFICATION_SCRIPT_ORDER = [
 
 export type VerificationScriptName = (typeof VERIFICATION_SCRIPT_ORDER)[number];
 export type BaselineStatus = "PASSED" | "FAILED";
+export type VerificationPackageManager = "npm" | "pnpm";
 
 export type VerificationPlanStep = {
   scriptName: VerificationScriptName;
@@ -28,11 +29,27 @@ export type BaselineVerificationResult = {
   skippedScripts: VerificationScriptName[];
 };
 
-export function discoverVerificationPlan(scripts: Record<string, string>): VerificationPlanStep[] {
+export function installCommandForPackageManager(
+  packageManager: VerificationPackageManager
+): string {
+  return packageManager === "pnpm" ? "pnpm install --frozen-lockfile" : "npm ci";
+}
+
+export function scriptCommandForPackageManager(
+  packageManager: VerificationPackageManager,
+  scriptName: VerificationScriptName
+): string {
+  return packageManager === "pnpm" ? `pnpm run ${scriptName}` : `npm run ${scriptName}`;
+}
+
+export function discoverVerificationPlan(
+  scripts: Record<string, string>,
+  packageManager: VerificationPackageManager = "npm"
+): VerificationPlanStep[] {
   return VERIFICATION_SCRIPT_ORDER.filter((scriptName) => scripts[scriptName] !== undefined).map(
     (scriptName) => ({
       scriptName,
-      command: `npm run ${scriptName}`
+      command: scriptCommandForPackageManager(packageManager, scriptName)
     })
   );
 }

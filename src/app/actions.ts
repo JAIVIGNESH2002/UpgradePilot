@@ -23,6 +23,12 @@ export async function runBaselineAction(formData: FormData) {
     const result = await runBaselineVerification({
       repositoryUrl,
       scripts: inspection.package.scripts,
+      packageManager:
+        inspection.package.packageManager.name === "pnpm"
+          ? "pnpm"
+          : inspection.package.packageManager.name === "npm"
+            ? "npm"
+            : undefined,
       sandboxProvider: new TrueForgeSandboxProvider()
     });
 
