@@ -214,7 +214,7 @@ export class TrueForgeClient {
           ].join(" "),
           response_format: { type: "json_object" },
           config: {
-            iteration_limit: 8,
+            iteration_limit: readPositiveIntegerEnv("TRUEFORGE_ITERATION_LIMIT", 24),
             sandbox: { enabled: true, file_downloads: false },
             dynamic_sub_agents: { enabled: false },
             generative_ui: { enabled: false },
@@ -521,4 +521,16 @@ async function readResponseError(response: Response): Promise<string> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const rawValue = process.env[name];
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
