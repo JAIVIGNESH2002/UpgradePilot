@@ -217,6 +217,7 @@ describe("TrueForgeSandboxProvider", () => {
       agent: {
         spec: {
           config: {
+            iteration_limit: 24,
             sandbox: { enabled: true, file_downloads: false }
           }
         }
