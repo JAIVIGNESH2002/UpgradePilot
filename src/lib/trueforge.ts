@@ -9,6 +9,7 @@ import {
   type BaselineVerificationResult,
   type BaselineStatus,
   type CommandResult,
+  type VerificationPackageManager,
   type VerificationScriptName
 } from "@/lib/verification";
 
@@ -181,6 +182,7 @@ export class TrueForgeClient {
   async runNpmBaselineWorkflow(input: {
     repositoryUrl: string;
     scripts: Record<string, string>;
+    packageManager: VerificationPackageManager;
   }): Promise<BaselineVerificationResult> {
     const health = await this.getHealth();
     const sandboxProvider = await this.getSandboxProviderStatus();
@@ -229,7 +231,7 @@ export class TrueForgeClient {
         input: [
           {
             type: "user.message",
-            content: buildNpmBaselineTurnPrompt(input.repositoryUrl)
+            content: buildNpmBaselineTurnPrompt(input.repositoryUrl, input.packageManager)
           }
         ],
         previous_turn_id: "none",
@@ -406,6 +408,7 @@ export class TrueForgeSandboxProvider implements SandboxProvider {
   async runBaseline(input: {
     repositoryUrl: string;
     scripts: Record<string, string>;
+    packageManager: VerificationPackageManager;
   }): Promise<BaselineVerificationResult> {
     return this.client.runNpmBaselineWorkflow(input);
   }
@@ -419,15 +422,20 @@ function mapBaselineWorkflowResult(
   result: TrueForgeBaselineWorkflowResult,
   scripts: Record<string, string>
 ): BaselineVerificationResult {
-  const install = result.commands.find((command) => command.command === "npm ci");
+  const install = result.commands.find(
+    (command) =>
+      command.command === "npm ci" || command.command === "pnpm install --frozen-lockfile"
+  );
 
   if (!install) {
     throw new TrueForgeIntegrationError(
-      "TrueForge baseline workflow did not include the required npm ci command result."
+      "TrueForge baseline workflow did not include the required package-manager install command result."
     );
   }
 
-  const verification = result.commands.filter((command) => command.command.startsWith("npm run "));
+  const verification = result.commands.filter(
+    (command) => command.command.startsWith("npm run ") || command.command.startsWith("pnpm run ")
+  );
 
   return {
     status: result.overallStatus,

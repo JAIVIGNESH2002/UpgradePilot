@@ -35,6 +35,7 @@ describe("runBaselineVerification", () => {
     const baseline = await runBaselineVerification({
       repositoryUrl: "https://github.com/acme/provider-flow",
       scripts: { test: "vitest run" },
+      packageManager: "npm",
       sandboxProvider: {
         async createWorkspace() {
           throw new Error("createWorkspace should not be called");
@@ -59,6 +60,7 @@ describe("runBaselineVerification", () => {
       runBaselineVerification({
         repositoryUrl: "https://github.com/acme/failing",
         scripts: { test: "vitest run" },
+        packageManager: "npm",
         sandboxProvider: fakeSandbox({
           "npm ci": result("npm ci", 1)
         })
@@ -77,6 +79,7 @@ describe("runBaselineVerification", () => {
         lint: "eslint .",
         test: "vitest run"
       },
+      packageManager: "npm",
       sandboxProvider: fakeSandbox({
         "npm ci": result("npm ci", 0),
         "npm run lint": result("npm run lint", 0),
@@ -91,6 +94,22 @@ describe("runBaselineVerification", () => {
     ]);
   });
 
+  it("uses pnpm install and script commands for pnpm repositories", async () => {
+    const baseline = await runBaselineVerification({
+      repositoryUrl: "https://github.com/acme/pnpm",
+      scripts: { test: "vitest run" },
+      packageManager: "pnpm",
+      sandboxProvider: fakeSandbox({
+        "pnpm install --frozen-lockfile": result("pnpm install --frozen-lockfile", 0),
+        "pnpm run test": result("pnpm run test", 0)
+      })
+    });
+
+    expect(baseline.status).toBe("PASSED");
+    expect(baseline.install.command).toBe("pnpm install --frozen-lockfile");
+    expect(baseline.verification.map((item) => item.command)).toEqual(["pnpm run test"]);
+  });
+
   it("classifies verification failures as failed baselines", async () => {
     const baseline = await runBaselineVerification({
       repositoryUrl: "https://github.com/acme/failing-tests",
@@ -98,6 +117,7 @@ describe("runBaselineVerification", () => {
         test: "vitest run",
         build: "next build"
       },
+      packageManager: "npm",
       sandboxProvider: fakeSandbox({
         "npm ci": result("npm ci", 0),
         "npm run test": result("npm run test", 1),

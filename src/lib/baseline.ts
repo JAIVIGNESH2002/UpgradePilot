@@ -1,9 +1,11 @@
 import {
   classifyBaselineStatus,
   discoverVerificationPlan,
+  installCommandForPackageManager,
   listMissingVerificationScripts,
   type BaselineVerificationResult,
   type CommandResult,
+  type VerificationPackageManager,
   type VerificationScriptName,
   truncateCommandOutput
 } from "@/lib/verification";
@@ -17,26 +19,32 @@ export type SandboxProvider = {
   runBaseline?(input: {
     repositoryUrl: string;
     scripts: Record<string, string>;
+    packageManager: VerificationPackageManager;
   }): Promise<BaselineVerificationResult>;
 };
 
 export type BaselineVerificationInput = {
   repositoryUrl: string;
   scripts: Record<string, string>;
+  packageManager?: VerificationPackageManager;
   sandboxProvider: SandboxProvider;
 };
 
 export async function runBaselineVerification({
   repositoryUrl,
   scripts,
+  packageManager = "npm",
   sandboxProvider
 }: BaselineVerificationInput): Promise<BaselineVerificationResult> {
   if (sandboxProvider.runBaseline) {
-    return sandboxProvider.runBaseline({ repositoryUrl, scripts });
+    return sandboxProvider.runBaseline({ repositoryUrl, scripts, packageManager });
   }
 
   const workspace = await sandboxProvider.createWorkspace({ repositoryUrl });
-  const install = await runWorkspaceCommand(workspace, "npm ci");
+  const install = await runWorkspaceCommand(
+    workspace,
+    installCommandForPackageManager(packageManager)
+  );
 
   if (install.exitCode !== 0) {
     return {
@@ -49,7 +57,7 @@ export async function runBaselineVerification({
 
   const verification = [];
 
-  for (const step of discoverVerificationPlan(scripts)) {
+  for (const step of discoverVerificationPlan(scripts, packageManager)) {
     verification.push(await runWorkspaceCommand(workspace, step.command));
   }
 

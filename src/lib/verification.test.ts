@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyBaselineStatus,
   discoverVerificationPlan,
+  installCommandForPackageManager,
   listMissingVerificationScripts
 } from "@/lib/verification";
 
@@ -26,6 +27,14 @@ describe("verification planning", () => {
       { scriptName: "lint", command: "npm run lint" },
       { scriptName: "test", command: "npm run test" },
       { scriptName: "build", command: "npm run build" }
+    ]);
+  });
+
+  it("generates package-manager-specific install and script commands", () => {
+    expect(installCommandForPackageManager("npm")).toBe("npm ci");
+    expect(installCommandForPackageManager("pnpm")).toBe("pnpm install --frozen-lockfile");
+    expect(discoverVerificationPlan({ test: "vitest run" }, "pnpm")).toEqual([
+      { scriptName: "test", command: "pnpm run test" }
     ]);
   });
 
