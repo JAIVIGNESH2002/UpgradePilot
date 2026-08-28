@@ -129,7 +129,10 @@ export function repositoryNeedsInspectionRefresh(repository: WorkspaceRepository
   }
 
   return repository.package.dependencies.some(
-    (dependency) => repository.dependencyVersions[dependency.packageName] === undefined
+    (dependency) =>
+      repository.dependencyVersions[dependency.packageName] === undefined ||
+      repository.dependencyVersions[dependency.packageName]?.reason ===
+        "Latest version has not been checked."
   );
 }
 

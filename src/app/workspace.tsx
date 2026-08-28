@@ -35,6 +35,10 @@ type UpgradePreparationState =
   | { status: "preparing"; dependencyName: string }
   | { status: "ready"; dependencyName: string; message: string }
   | { status: "error"; dependencyName: string; message: string };
+type RepositoryRefreshState =
+  | { status: "idle" }
+  | { status: "loading"; repositoryId: string }
+  | { status: "error"; repositoryId: string; message: string };
 
 const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -52,6 +56,9 @@ export function RepositoryWorkspace() {
     status: "idle"
   });
   const [upgradePreparationState, setUpgradePreparationState] = useState<UpgradePreparationState>({
+    status: "idle"
+  });
+  const [repositoryRefreshState, setRepositoryRefreshState] = useState<RepositoryRefreshState>({
     status: "idle"
   });
   const [query, setQuery] = useState("");
@@ -83,12 +90,10 @@ export function RepositoryWorkspace() {
     );
   }, [hasLoadedWorkspace, repositories, selectedRepositoryId]);
 
-  const selectedRepository = useMemo(
-    () => repositories.find((repository) => repository.id === selectedRepositoryId) ?? null,
-    [repositories, selectedRepositoryId]
-  );
-
   useEffect(() => {
+    const selectedRepository =
+      repositories.find((repository) => repository.id === selectedRepositoryId) ?? null;
+
     if (
       !hasLoadedWorkspace ||
       selectedRepository === null ||
@@ -99,53 +104,87 @@ export function RepositoryWorkspace() {
     }
 
     const repositoryIdToRefresh = selectedRepository.id;
-    const repositoryUrlToRefresh = selectedRepository.repositoryUrl;
-    const controller = new AbortController();
-    refreshAttemptedRepositoryIds.current.add(repositoryIdToRefresh);
-
-    async function refreshSelectedRepository() {
-      try {
-        const response = await fetch("/api/repositories/inspect", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repositoryUrl: repositoryUrlToRefresh }),
-          signal: controller.signal
-        });
-        const body = (await response.json()) as {
-          inspection?: RepositoryInspection;
-          dependencyVersions?: Record<string, DependencyVersionInfo>;
-        };
-
-        if (!response.ok || body.inspection === undefined) {
-          return;
-        }
-
-        const refreshedRepository = workspaceRepositoryFromInspection(
-          body.inspection,
-          body.dependencyVersions ?? {}
-        );
-
-        setRepositories((currentRepositories) =>
-          currentRepositories.map((currentRepository) =>
-            currentRepository.id === repositoryIdToRefresh
-              ? {
-                  ...refreshedRepository,
-                  baseline: currentRepository.baseline
-                }
-              : currentRepository
-          )
-        );
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
+    const timer = window.setTimeout(() => {
+      if (refreshAttemptedRepositoryIds.current.has(repositoryIdToRefresh)) {
+        return;
       }
+
+      refreshAttemptedRepositoryIds.current.add(repositoryIdToRefresh);
+      void refreshRepository(selectedRepository, { visible: false });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [hasLoadedWorkspace, repositories, selectedRepositoryId]);
+
+  const selectedRepository = useMemo(
+    () => repositories.find((repository) => repository.id === selectedRepositoryId) ?? null,
+    [repositories, selectedRepositoryId]
+  );
+
+  async function refreshRepository(
+    repository: WorkspaceRepository,
+    {
+      signal,
+      visible
+    }: {
+      signal?: AbortSignal;
+      visible: boolean;
+    }
+  ) {
+    if (visible) {
+      setRepositoryRefreshState({ status: "loading", repositoryId: repository.id });
     }
 
-    void refreshSelectedRepository();
+    try {
+      const response = await fetch("/api/repositories/inspect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repositoryUrl: repository.repositoryUrl }),
+        signal
+      });
+      const body = (await response.json()) as {
+        inspection?: RepositoryInspection;
+        dependencyVersions?: Record<string, DependencyVersionInfo>;
+        message?: string;
+      };
 
-    return () => controller.abort();
-  }, [hasLoadedWorkspace, selectedRepository]);
+      if (!response.ok || body.inspection === undefined) {
+        throw new Error(body.message ?? "Repository inspection failed.");
+      }
+
+      const refreshedRepository = workspaceRepositoryFromInspection(
+        body.inspection,
+        body.dependencyVersions ?? {}
+      );
+
+      setRepositories((currentRepositories) =>
+        currentRepositories.map((currentRepository) =>
+          currentRepository.id === repository.id
+            ? {
+                ...refreshedRepository,
+                baseline: currentRepository.baseline
+              }
+            : currentRepository
+        )
+      );
+
+      if (visible) {
+        setRepositoryRefreshState({ status: "idle" });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+
+      if (visible) {
+        setRepositoryRefreshState({
+          status: "error",
+          repositoryId: repository.id,
+          message: error instanceof Error ? error.message : "Repository inspection failed."
+        });
+      }
+    }
+  }
 
   async function handleAddRepository(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -297,10 +336,12 @@ export function RepositoryWorkspace() {
               query={query}
               filter={filter}
               baselineActionState={baselineActionState}
+              repositoryRefreshState={repositoryRefreshState}
               upgradePreparationState={upgradePreparationState}
               onQueryChange={setQuery}
               onFilterChange={setFilter}
               onRunBaseline={runBaseline}
+              onRefreshRepository={refreshRepository}
               onPrepareVerifyUpgrade={prepareVerifyUpgrade}
             />
           ) : (
@@ -469,22 +510,29 @@ function RepositoryDetail({
   query,
   filter,
   baselineActionState,
+  repositoryRefreshState,
   upgradePreparationState,
   onQueryChange,
   onFilterChange,
   onRunBaseline,
+  onRefreshRepository,
   onPrepareVerifyUpgrade
 }: {
   repository: WorkspaceRepository | null;
   query: string;
   filter: DependencyFilter;
   baselineActionState: BaselineActionState;
+  repositoryRefreshState: RepositoryRefreshState;
   upgradePreparationState: UpgradePreparationState;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
   onRunBaseline: (
     repository: WorkspaceRepository
   ) => Promise<WorkspaceRepository["baseline"] | null>;
+  onRefreshRepository: (
+    repository: WorkspaceRepository,
+    options: { visible: boolean }
+  ) => Promise<void>;
   onPrepareVerifyUpgrade: (
     repository: WorkspaceRepository,
     dependency: WorkspaceDependency
@@ -515,8 +563,10 @@ function RepositoryDetail({
         filteredDependencies={filteredDependencies}
         query={query}
         filter={filter}
+        repositoryRefreshState={repositoryRefreshState}
         onQueryChange={onQueryChange}
         onFilterChange={onFilterChange}
+        onRefreshRepository={onRefreshRepository}
         onPrepareVerifyUpgrade={onPrepareVerifyUpgrade}
       />
     </div>
@@ -654,8 +704,10 @@ function DependencySurface({
   filteredDependencies,
   query,
   filter,
+  repositoryRefreshState,
   onQueryChange,
   onFilterChange,
+  onRefreshRepository,
   onPrepareVerifyUpgrade
 }: {
   repository: WorkspaceRepository;
@@ -663,13 +715,27 @@ function DependencySurface({
   filteredDependencies: WorkspaceDependency[];
   query: string;
   filter: DependencyFilter;
+  repositoryRefreshState: RepositoryRefreshState;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
+  onRefreshRepository: (
+    repository: WorkspaceRepository,
+    options: { visible: boolean }
+  ) => Promise<void>;
   onPrepareVerifyUpgrade: (
     repository: WorkspaceRepository,
     dependency: WorkspaceDependency
   ) => Promise<void>;
 }) {
+  const isRefreshing =
+    repositoryRefreshState.status === "loading" &&
+    repositoryRefreshState.repositoryId === repository.id;
+  const refreshError =
+    repositoryRefreshState.status === "error" &&
+    repositoryRefreshState.repositoryId === repository.id
+      ? repositoryRefreshState.message
+      : null;
+
   return (
     <section className="space-y-3">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -680,6 +746,16 @@ function DependencySurface({
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isRefreshing}
+            onClick={() => void onRefreshRepository(repository, { visible: true })}
+          >
+            {isRefreshing ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+            Refresh versions
+          </Button>
           <label className="relative block">
             <span className="sr-only">Search dependencies</span>
             <Search
@@ -713,6 +789,7 @@ function DependencySurface({
           </div>
         </div>
       </div>
+      {refreshError ? <p className="text-sm text-destructive">{refreshError}</p> : null}
 
       <div className="overflow-hidden rounded-md border border-border">
         <div className="overflow-x-auto">

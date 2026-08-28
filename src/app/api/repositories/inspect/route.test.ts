@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "@/app/api/repositories/inspect/route";
+import type { RepositoryInspection } from "@/lib/package-inspection";
 import { inspectPublicNpmRepository } from "@/lib/repository-inspection";
 
 vi.mock("@/lib/repository-inspection", () => ({
@@ -53,6 +54,50 @@ describe("POST /api/repositories/inspect", () => {
     });
   });
 
+  it("fetches latest versions only for normal registry dependencies", async () => {
+    const inspection = makeRepositoryInspection();
+    inspection.package.dependencies = [
+      {
+        packageName: "@types/node",
+        currentVersion: "^22.0.0",
+        resolvedVersion: "22.17.1",
+        kind: "devDependency"
+      },
+      {
+        packageName: "local-package",
+        currentVersion: "workspace:*",
+        resolvedVersion: null,
+        kind: "dependency"
+      }
+    ];
+    inspectPublicNpmRepositoryMock.mockResolvedValue(inspection);
+
+    const response = await POST(
+      new Request("http://localhost/api/repositories/inspect", {
+        method: "POST",
+        body: JSON.stringify({ repositoryUrl: "https://github.com/acme/widgets" })
+      })
+    );
+    const body = (await response.json()) as {
+      dependencyVersions: Record<string, { latestVersion: string | null; changeType: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://registry.npmjs.org/%40types%2Fnode",
+      expect.any(Object)
+    );
+    expect(body.dependencyVersions["@types/node"]).toMatchObject({
+      latestVersion: "19.0.0",
+      changeType: "current"
+    });
+    expect(body.dependencyVersions["local-package"]).toMatchObject({
+      latestVersion: null,
+      changeType: "unavailable"
+    });
+  });
+
   it("returns a validation error for a missing repository URL", async () => {
     const response = await POST(
       new Request("http://localhost/api/repositories/inspect", {
@@ -81,7 +126,7 @@ describe("POST /api/repositories/inspect", () => {
   });
 });
 
-function makeRepositoryInspection() {
+function makeRepositoryInspection(): RepositoryInspection {
   return {
     metadata: {
       owner: "acme",

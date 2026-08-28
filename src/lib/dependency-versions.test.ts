@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   classifySemverChange,
   comparableCurrentVersion,
-  enrichDependencyVersion
+  enrichDependencyVersion,
+  isNormalRegistryDependency
 } from "@/lib/dependency-versions";
 
 describe("dependency version comparison", () => {
@@ -33,7 +34,15 @@ describe("dependency version comparison", () => {
         resolvedVersion: null,
         kind: "dependency"
       })
-    ).toBe("18.0.0");
+    ).toBeNull();
+    expect(
+      comparableCurrentVersion({
+        packageName: "exact",
+        currentVersion: "1.2.3",
+        resolvedVersion: null,
+        kind: "dependency"
+      })
+    ).toBe("1.2.3");
     expect(
       comparableCurrentVersion({
         packageName: "local-package",
@@ -104,5 +113,24 @@ describe("dependency version comparison", () => {
       changeType: "unavailable",
       reason: "Current dependency spec is not a comparable semver version."
     });
+  });
+
+  it("identifies normal registry dependencies without filtering valid ranges", () => {
+    expect(
+      isNormalRegistryDependency({
+        packageName: "react",
+        currentVersion: "^18.0.0",
+        resolvedVersion: null,
+        kind: "dependency"
+      })
+    ).toBe(true);
+    expect(
+      isNormalRegistryDependency({
+        packageName: "local-package",
+        currentVersion: "workspace:*",
+        resolvedVersion: null,
+        kind: "dependency"
+      })
+    ).toBe(false);
   });
 });

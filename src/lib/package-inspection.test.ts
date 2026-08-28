@@ -66,10 +66,28 @@ describe("inspectPackageFiles", () => {
       packageJsonText: JSON.stringify({
         name: "demo",
         packageManager: "pnpm@10.0.0",
-        dependencies: { react: "^19.0.0" }
+        dependencies: { "@scope/pkg": "^1.0.0", react: "^19.0.0" },
+        devDependencies: { vitest: "^4.0.0" }
       }),
       packageLockText: null,
-      pnpmLockText: "lockfileVersion: '9.0'"
+      pnpmLockText: [
+        "lockfileVersion: '9.0'",
+        "",
+        "importers:",
+        "",
+        "  .:",
+        "    dependencies:",
+        "      '@scope/pkg':",
+        "        specifier: ^1.0.0",
+        "        version: 1.2.3(react@19.2.0)",
+        "      react:",
+        "        specifier: ^19.0.0",
+        "        version: 19.2.0",
+        "    devDependencies:",
+        "      vitest:",
+        "        specifier: ^4.0.0",
+        "        version: 4.1.0"
+      ].join("\n")
     });
 
     expect(inspection.packageManager).toMatchObject({
@@ -80,6 +98,26 @@ describe("inspectPackageFiles", () => {
       installCommand: "pnpm install --frozen-lockfile"
     });
     expect(inspection.hasPackageLock).toBe(false);
+    expect(inspection.dependencies).toEqual([
+      {
+        packageName: "@scope/pkg",
+        currentVersion: "^1.0.0",
+        resolvedVersion: "1.2.3",
+        kind: "dependency"
+      },
+      {
+        packageName: "react",
+        currentVersion: "^19.0.0",
+        resolvedVersion: "19.2.0",
+        kind: "dependency"
+      },
+      {
+        packageName: "vitest",
+        currentVersion: "^4.0.0",
+        resolvedVersion: "4.1.0",
+        kind: "devDependency"
+      }
+    ]);
   });
 
   it("detects Yarn and Bun as recognized but unsupported", () => {

@@ -305,6 +305,51 @@ describe("RepositoryWorkspace", () => {
       })
     );
   });
+
+  it("allows manually refreshing unavailable latest-version data", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      {
+        react: {
+          packageName: "react",
+          latestVersion: null,
+          currentComparableVersion: "18.3.1",
+          changeType: "unavailable",
+          lookupStatus: "unavailable",
+          reason: "npm registry returned 503."
+        },
+        vitest: {
+          packageName: "vitest",
+          latestVersion: null,
+          currentComparableVersion: "4.0.0",
+          changeType: "unavailable",
+          lookupStatus: "unavailable",
+          reason: "npm registry returned 503."
+        }
+      }
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      Response.json({
+        inspection: makeRepositoryInspection("acme", "widgets"),
+        dependencyVersions: makeDependencyVersions()
+      })
+    );
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+
+    render(<RepositoryWorkspace />);
+
+    expect(await screen.findByRole("heading", { name: "widgets" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
+
+    await waitFor(() => expect(screen.getByText("19.0.0")).toBeVisible());
+    expect(screen.getByRole("button", { name: "Verify upgrade" })).toBeEnabled();
+  });
 });
 
 function makeRepositoryInspection(

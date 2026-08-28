@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { enrichDependencyVersion } from "@/lib/dependency-versions";
+import { enrichDependencyVersion, isNormalRegistryDependency } from "@/lib/dependency-versions";
 import { NpmRegistryClient } from "@/lib/npm-registry";
 import { inspectPublicNpmRepository } from "@/lib/repository-inspection";
 
@@ -16,8 +16,9 @@ export async function POST(request: Request) {
       token: process.env.GITHUB_TOKEN
     });
     const registryClient = new NpmRegistryClient();
+    const registryDependencies = inspection.package.dependencies.filter(isNormalRegistryDependency);
     const latestVersions = await registryClient.getLatestVersions(
-      inspection.package.dependencies.map((dependency) => dependency.packageName)
+      registryDependencies.map((dependency) => dependency.packageName)
     );
     const dependencyVersions = Object.fromEntries(
       inspection.package.dependencies.map((dependency) => [

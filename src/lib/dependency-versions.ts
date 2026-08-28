@@ -1,3 +1,5 @@
+import semver from "semver";
+
 import type { DependencyInventoryItem } from "@/lib/package-inspection";
 import type { NpmPackageLatestResult } from "@/lib/npm-registry";
 
@@ -50,32 +52,42 @@ export function enrichDependencyVersion(
   };
 }
 
+export function isNormalRegistryDependency(dependency: DependencyInventoryItem): boolean {
+  const spec = dependency.currentVersion.trim();
+
+  return (
+    spec !== "" &&
+    !spec.startsWith("git+") &&
+    !spec.startsWith("github:") &&
+    !spec.startsWith("file:") &&
+    !spec.startsWith("workspace:") &&
+    !spec.startsWith("link:") &&
+    !spec.startsWith("npm:")
+  );
+}
+
 export function classifySemverChange(
   currentVersion: string,
   latestVersion: string
 ): DependencyChangeType {
-  const current = parseSemver(currentVersion);
-  const latest = parseSemver(latestVersion);
+  const current = normalizeSemver(currentVersion);
+  const latest = normalizeSemver(latestVersion);
 
   if (current === null || latest === null) {
     return "unavailable";
   }
 
-  if (
-    latest.major < current.major ||
-    (latest.major === current.major && latest.minor < current.minor) ||
-    (latest.major === current.major &&
-      latest.minor === current.minor &&
-      latest.patch <= current.patch)
-  ) {
+  if (semver.compare(latest, current) <= 0) {
     return "current";
   }
 
-  if (latest.major > current.major) {
+  const difference = semver.diff(current, latest);
+
+  if (difference === "major" || difference === "premajor") {
     return "major";
   }
 
-  if (latest.minor > current.minor) {
+  if (difference === "minor" || difference === "preminor") {
     return "minor";
   }
 
@@ -87,10 +99,10 @@ export function comparableCurrentVersion(dependency: DependencyInventoryItem): s
     return normalizeSemver(dependency.resolvedVersion);
   }
 
-  return normalizeDeclaredSemverRange(dependency.currentVersion);
+  return normalizeExactDeclaredVersion(dependency.currentVersion);
 }
 
-function normalizeDeclaredSemverRange(input: string): string | null {
+function normalizeExactDeclaredVersion(input: string): string | null {
   const trimmed = input.trim();
 
   if (
@@ -105,37 +117,13 @@ function normalizeDeclaredSemverRange(input: string): string | null {
     return null;
   }
 
-  if (trimmed.includes(" ") || trimmed.includes("||") || /^[<>]/.test(trimmed)) {
+  if (trimmed !== semver.valid(trimmed)) {
     return null;
   }
 
-  const cleaned = trimmed.replace(/^[~^=v\s]+/, "");
-
-  return cleaned ? normalizeSemver(cleaned) : null;
+  return normalizeSemver(trimmed);
 }
 
 function normalizeSemver(input: string): string | null {
-  const match = input.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
-
-  if (match === null) {
-    return null;
-  }
-
-  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}`;
-}
-
-function parseSemver(input: string): { major: number; minor: number; patch: number } | null {
-  const normalized = normalizeSemver(input);
-
-  if (normalized === null) {
-    return null;
-  }
-
-  const [major, minor, patch] = normalized.split(".").map(Number);
-
-  if (major === undefined || minor === undefined || patch === undefined) {
-    return null;
-  }
-
-  return { major, minor, patch };
+  return semver.clean(input);
 }
