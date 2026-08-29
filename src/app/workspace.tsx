@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowLeft,
   ArrowUpRight,
   CheckCircle2,
   ChevronDown,
@@ -36,6 +37,7 @@ import {
   type WorkspaceBaselineStep,
   type WorkspaceRepository
 } from "@/lib/repository-workspace";
+import type { UpgradeRunSnapshot, UpgradeRunStep } from "@/lib/upgrade-run-store";
 import { cn } from "@/lib/utils";
 
 type AddRepositoryState =
@@ -62,6 +64,10 @@ type BaselineRunResponse = {
   };
   message?: string;
 };
+type UpgradeRunResponse = {
+  run?: UpgradeRunSnapshot;
+  message?: string;
+};
 
 const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -84,6 +90,8 @@ export function RepositoryWorkspace() {
   const [repositoryRefreshState, setRepositoryRefreshState] = useState<RepositoryRefreshState>({
     status: "idle"
   });
+  const [activeUpgradeRun, setActiveUpgradeRun] = useState<UpgradeRunSnapshot | null>(null);
+  const [verifiedUpgradeKeys, setVerifiedUpgradeKeys] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DependencyFilter>("all");
   const [hasLoadedWorkspace, setHasLoadedWorkspace] = useState(false);
@@ -259,6 +267,16 @@ export function RepositoryWorkspace() {
   }
 
   function handleRemoveRepository(repositoryIdToRemove: string) {
+    setActiveUpgradeRun((currentRun) =>
+      currentRun !== null &&
+      repositories.some(
+        (repository) =>
+          repository.id === repositoryIdToRemove &&
+          repository.repositoryUrl === currentRun.repositoryUrl
+      )
+        ? null
+        : currentRun
+    );
     setRepositories((currentRepositories) => {
       const nextRepositories = removeRepository(currentRepositories, repositoryIdToRemove);
       setSelectedRepositoryId((currentSelectedRepositoryId) =>
@@ -270,6 +288,11 @@ export function RepositoryWorkspace() {
       );
       return nextRepositories;
     });
+  }
+
+  function handleSelectRepository(repositoryId: string) {
+    setActiveUpgradeRun(null);
+    setSelectedRepositoryId(repositoryId);
   }
 
   async function runBaseline(repository: WorkspaceRepository) {
@@ -338,25 +361,77 @@ export function RepositoryWorkspace() {
   ) {
     setUpgradePreparationState({ status: "preparing", dependencyName: dependency.packageName });
 
-    const baseline =
-      repository.baseline.status === "healthy"
-        ? repository.baseline
-        : await runBaseline(repository);
+    try {
+      const baseline =
+        repository.baseline.status === "healthy"
+          ? repository.baseline
+          : await runBaseline(repository);
 
-    if (baseline?.status !== "healthy") {
+      if (baseline?.status !== "healthy") {
+        setUpgradePreparationState({
+          status: "error",
+          dependencyName: dependency.packageName,
+          message: "A healthy baseline is required before opening an upgrade run."
+        });
+        return;
+      }
+
+      if (
+        dependency.latestVersion === null ||
+        dependency.currentComparableVersion === null ||
+        (dependency.changeType !== "patch" &&
+          dependency.changeType !== "minor" &&
+          dependency.changeType !== "major")
+      ) {
+        setUpgradePreparationState({
+          status: "error",
+          dependencyName: dependency.packageName,
+          message: "A resolved current version and newer registry target are required."
+        });
+        return;
+      }
+
+      if (
+        repository.package.packageManager.name !== "npm" &&
+        repository.package.packageManager.name !== "pnpm"
+      ) {
+        setUpgradePreparationState({
+          status: "error",
+          dependencyName: dependency.packageName,
+          message: "Only npm and pnpm upgrade verification is supported."
+        });
+        return;
+      }
+
+      const startedRun = await startUpgradeRun({
+        repositoryUrl: repository.repositoryUrl,
+        packageName: dependency.packageName,
+        currentVersion: dependency.currentComparableVersion,
+        targetVersion: dependency.latestVersion,
+        changeType: dependency.changeType,
+        baseline,
+        packageManager: repository.package.packageManager.name
+      });
+
+      setActiveUpgradeRun(startedRun);
+      markVerifiedUpgrade(repository, dependency, startedRun);
+
+      if (startedRun.status === "running") {
+        void pollUpgradeRun(startedRun.id, repository.id);
+      }
+
+      setUpgradePreparationState({
+        status: "ready",
+        dependencyName: dependency.packageName,
+        message: `${dependency.packageName} upgrade run started for ${dependency.currentComparableVersion} to ${dependency.latestVersion}.`
+      });
+    } catch (error) {
       setUpgradePreparationState({
         status: "error",
         dependencyName: dependency.packageName,
-        message: "A healthy baseline is required before opening an upgrade run."
+        message: error instanceof Error ? error.message : "Upgrade run failed to start."
       });
-      return;
     }
-
-    setUpgradePreparationState({
-      status: "ready",
-      dependencyName: dependency.packageName,
-      message: `${dependency.packageName} can open an upgrade run targeting ${dependency.latestVersion}.`
-    });
   }
 
   async function parseBaselineRunResponse(response: Response) {
@@ -367,6 +442,96 @@ export function RepositoryWorkspace() {
     }
 
     return body.run;
+  }
+
+  async function startUpgradeRun(input: {
+    repositoryUrl: string;
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    changeType: "patch" | "minor" | "major";
+    baseline: WorkspaceRepository["baseline"];
+    packageManager: "npm" | "pnpm";
+  }) {
+    const response = await fetch("/api/repositories/upgrade-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input)
+    });
+
+    return parseUpgradeRunResponse(response);
+  }
+
+  async function pollUpgradeRun(runId: string, repositoryId: string) {
+    let currentRun: UpgradeRunSnapshot | null = null;
+
+    try {
+      while (currentRun?.status !== "completed") {
+        await wait(1000);
+        const response = await fetch(
+          `/api/repositories/upgrade-runs/status?runId=${encodeURIComponent(runId)}`
+        );
+        currentRun = await parseUpgradeRunResponse(response);
+        setActiveUpgradeRun(currentRun);
+
+        if (currentRun.status === "completed" && currentRun.outcome === "verified") {
+          const verifiedRun = currentRun;
+          setVerifiedUpgradeKeys((currentKeys) => {
+            const nextKeys = new Set(currentKeys);
+            nextKeys.add(
+              upgradeVerificationKey({
+                repositoryId,
+                packageName: verifiedRun.packageName,
+                targetVersion: verifiedRun.targetVersion
+              })
+            );
+            return nextKeys;
+          });
+        }
+      }
+    } catch (error) {
+      setUpgradePreparationState({
+        status: "error",
+        dependencyName: "upgrade",
+        message: error instanceof Error ? error.message : "Upgrade run status could not be loaded."
+      });
+    }
+  }
+
+  async function parseUpgradeRunResponse(response: Response) {
+    const body = (await response.json()) as UpgradeRunResponse;
+
+    if (!response.ok || body.run === undefined) {
+      throw new Error(body.message ?? "Upgrade run failed to start.");
+    }
+
+    return body.run;
+  }
+
+  function markVerifiedUpgrade(
+    repository: WorkspaceRepository,
+    dependency: WorkspaceDependency,
+    run: UpgradeRunSnapshot
+  ) {
+    if (
+      run.status !== "completed" ||
+      run.outcome !== "verified" ||
+      dependency.latestVersion === null
+    ) {
+      return;
+    }
+
+    setVerifiedUpgradeKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys);
+      nextKeys.add(
+        upgradeVerificationKey({
+          repositoryId: repository.id,
+          packageName: dependency.packageName,
+          targetVersion: dependency.latestVersion
+        })
+      );
+      return nextKeys;
+    });
   }
 
   async function wait(durationMs: number) {
@@ -385,12 +550,18 @@ export function RepositoryWorkspace() {
           onAddRepository={handleAddRepository}
           onRepositoryUrlChange={setRepositoryUrl}
           onRemoveRepository={handleRemoveRepository}
-          onSelectRepository={setSelectedRepositoryId}
+          onSelectRepository={handleSelectRepository}
         />
 
         <section className="min-w-0">
           <TopHeader />
-          {hasLoadedWorkspace ? (
+          {hasLoadedWorkspace && activeUpgradeRun !== null && selectedRepository !== null ? (
+            <UpgradeRunDetail
+              repository={selectedRepository}
+              run={activeUpgradeRun}
+              onBack={() => setActiveUpgradeRun(null)}
+            />
+          ) : hasLoadedWorkspace ? (
             <RepositoryDetail
               repository={selectedRepository}
               query={query}
@@ -398,6 +569,7 @@ export function RepositoryWorkspace() {
               baselineActionState={baselineActionState}
               repositoryRefreshState={repositoryRefreshState}
               upgradePreparationState={upgradePreparationState}
+              verifiedUpgradeKeys={verifiedUpgradeKeys}
               onQueryChange={setQuery}
               onFilterChange={setFilter}
               onRunBaseline={runBaseline}
@@ -565,6 +737,126 @@ function RepositorySidebarItem({
   );
 }
 
+function UpgradeRunDetail({
+  repository,
+  run,
+  onBack
+}: {
+  repository: WorkspaceRepository;
+  run: UpgradeRunSnapshot;
+  onBack: () => void;
+}) {
+  const progressValue = upgradeRunProgressValue(run);
+  const isRunning = run.status === "running";
+
+  return (
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6">
+      <div className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <Button type="button" variant="ghost" size="sm" className="-ml-2 mb-3" onClick={onBack}>
+            <ArrowLeft className="size-4" aria-hidden="true" />
+            Back to repository
+          </Button>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Upgrade run
+          </p>
+          <h2 className="mt-1 truncate text-2xl font-semibold tracking-normal">
+            {run.packageName}
+          </h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {repository.metadata.owner}/{repository.metadata.name} - {run.currentVersion} to{" "}
+            {run.targetVersion}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-sm">
+          <UpgradeRunStatusIcon run={run} />
+          <span className="font-medium">{upgradeRunStatusLabel(run)}</span>
+        </div>
+      </div>
+
+      <section className="overflow-hidden rounded-md border border-border bg-background">
+        <div className="border-b border-border px-4 py-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-sm font-semibold">Workflow</h3>
+              <p className="mt-1 text-sm text-muted-foreground">{run.message}</p>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              Started {formatRepositoryUpdatedAt(run.startedAt)}
+            </span>
+          </div>
+        </div>
+        <div className="h-1 bg-secondary">
+          <div
+            className={cn(
+              "h-full bg-foreground transition-[width] duration-700 ease-out",
+              isRunning ? "motion-safe:animate-pulse" : ""
+            )}
+            style={{ width: `${progressValue}%` }}
+          />
+        </div>
+        <ol className="divide-y divide-border">
+          {run.steps.map((step, index) => (
+            <li key={`${step.name}:${index}`} className="px-4 py-4">
+              <UpgradeRunStepRow step={step} />
+            </li>
+          ))}
+        </ol>
+      </section>
+    </div>
+  );
+}
+
+function UpgradeRunStepRow({ step }: { step: UpgradeRunStep }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <BaselineStepIcon status={step.status} />
+          <p className="truncate text-sm font-medium">{step.name}</p>
+          <BaselineStepStatus status={step.status} />
+        </div>
+        {step.command ? (
+          <p className="mt-1 truncate pl-6 font-mono text-xs text-muted-foreground">
+            {step.command}
+          </p>
+        ) : null}
+        {step.output ? (
+          <details className="mt-2 pl-6">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+              View output
+            </summary>
+            <pre className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-secondary/30 p-3 text-xs leading-5 text-muted-foreground">
+              {step.output}
+            </pre>
+          </details>
+        ) : null}
+      </div>
+      {step.durationMs !== null ? (
+        <span className="pl-6 text-xs text-muted-foreground sm:pl-0">
+          {formatDuration(step.durationMs)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function UpgradeRunStatusIcon({ run }: { run: UpgradeRunSnapshot }) {
+  if (run.status === "running") {
+    return <Loader2 className="size-4 animate-spin" aria-hidden="true" />;
+  }
+
+  if (run.outcome === "verified") {
+    return <CheckCircle2 className="size-4 text-green-600" aria-hidden="true" />;
+  }
+
+  if (run.outcome === "blocked" || run.outcome === "interrupted") {
+    return <XCircle className="size-4 text-red-600" aria-hidden="true" />;
+  }
+
+  return <MinusCircle className="size-4 text-amber-600" aria-hidden="true" />;
+}
+
 function RepositoryDetail({
   repository,
   query,
@@ -572,6 +864,7 @@ function RepositoryDetail({
   baselineActionState,
   repositoryRefreshState,
   upgradePreparationState,
+  verifiedUpgradeKeys,
   onQueryChange,
   onFilterChange,
   onRunBaseline,
@@ -584,6 +877,7 @@ function RepositoryDetail({
   baselineActionState: BaselineActionState;
   repositoryRefreshState: RepositoryRefreshState;
   upgradePreparationState: UpgradePreparationState;
+  verifiedUpgradeKeys: Set<string>;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
   onRunBaseline: (
@@ -624,6 +918,7 @@ function RepositoryDetail({
         query={query}
         filter={filter}
         repositoryRefreshState={repositoryRefreshState}
+        verifiedUpgradeKeys={verifiedUpgradeKeys}
         onQueryChange={onQueryChange}
         onFilterChange={onFilterChange}
         onRefreshRepository={onRefreshRepository}
@@ -884,6 +1179,7 @@ function DependencySurface({
   query,
   filter,
   repositoryRefreshState,
+  verifiedUpgradeKeys,
   onQueryChange,
   onFilterChange,
   onRefreshRepository,
@@ -895,6 +1191,7 @@ function DependencySurface({
   query: string;
   filter: DependencyFilter;
   repositoryRefreshState: RepositoryRefreshState;
+  verifiedUpgradeKeys: Set<string>;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
   onRefreshRepository: (
@@ -997,6 +1294,13 @@ function DependencySurface({
                     key={`${dependency.kind}:${dependency.packageName}`}
                     repository={repository}
                     dependency={dependency}
+                    isVerified={verifiedUpgradeKeys.has(
+                      upgradeVerificationKey({
+                        repositoryId: repository.id,
+                        packageName: dependency.packageName,
+                        targetVersion: dependency.latestVersion
+                      })
+                    )}
                     onPrepareVerifyUpgrade={onPrepareVerifyUpgrade}
                   />
                 ))
@@ -1012,10 +1316,12 @@ function DependencySurface({
 function DependencyRow({
   repository,
   dependency,
+  isVerified,
   onPrepareVerifyUpgrade
 }: {
   repository: WorkspaceRepository;
   dependency: WorkspaceDependency;
+  isVerified: boolean;
   onPrepareVerifyUpgrade: (
     repository: WorkspaceRepository,
     dependency: WorkspaceDependency
@@ -1059,7 +1365,12 @@ function DependencyRow({
         ) : null}
       </td>
       <td className="px-4 py-3">
-        {hasUpgradeTarget ? (
+        {isVerified ? (
+          <span className="inline-flex items-center gap-1.5 text-sm font-medium text-green-700">
+            <CheckCircle2 className="size-4" aria-hidden="true" />
+            Verified upgrade
+          </span>
+        ) : hasUpgradeTarget ? (
           <Button
             type="button"
             variant="outline"
@@ -1229,6 +1540,52 @@ function baselineProgressValue(isRunning: boolean, baseline: WorkspaceRepository
   const progress = ((settledSteps + runningStep) / baseline.steps.length) * 100;
 
   return Math.min(Math.max(progress, isRunning ? 8 : 0), isRunning ? 96 : 100);
+}
+
+function upgradeRunProgressValue(run: UpgradeRunSnapshot) {
+  if (run.steps.length === 0) {
+    return run.status === "running" ? 8 : 100;
+  }
+
+  const settledSteps = run.steps.filter(
+    (step) => step.status === "passed" || step.status === "failed" || step.status === "skipped"
+  ).length;
+  const runningStep = run.steps.some((step) => step.status === "running") ? 0.65 : 0;
+  const progress = ((settledSteps + runningStep) / run.steps.length) * 100;
+
+  return Math.min(Math.max(progress, run.status === "running" ? 8 : 0), 100);
+}
+
+function upgradeRunStatusLabel(run: UpgradeRunSnapshot) {
+  if (run.status === "running") {
+    return "Running";
+  }
+
+  if (run.outcome === "verified") {
+    return "Verified";
+  }
+
+  if (run.outcome === "blocked") {
+    return "Blocked";
+  }
+
+  if (run.outcome === "interrupted") {
+    return "Interrupted";
+  }
+
+  return "Repair handoff";
+}
+
+function upgradeVerificationKey({
+  repositoryId,
+  packageName,
+  targetVersion
+}: {
+  repositoryId: string;
+  packageName: string;
+  targetVersion: string | null;
+}) {
+  return `${repositoryId}:${packageName}:${targetVersion ?? "none"}`;
 }
 
 function upgradePreparationMessage(upgradePreparationState: UpgradePreparationState) {

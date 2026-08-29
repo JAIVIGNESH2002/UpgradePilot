@@ -1,13 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   TrueForgeClient,
   TrueForgeIntegrationError,
   TrueForgeSandboxProvider,
-  parseBaselineWorkflowResult
+  parseBaselineWorkflowResult,
+  parseUpgradeWorkflowResult
 } from "@/lib/trueforge";
 
 describe("TrueForgeClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("reads health and sandbox provider status from the confirmed API contract", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
@@ -126,6 +131,207 @@ describe("TrueForgeClient", () => {
       "TrueForge is not reachable at TRUEFORGE_BASE_URL (http://localhost:8790)."
     );
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates a constrained repair handoff turn without sandbox execution", async () => {
+    vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ method, url: href, body });
+
+      if (href.endsWith("/api/v1/models")) {
+        return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
+      }
+
+      if (href.endsWith("/api/v1/sessions") && method === "POST") {
+        return Response.json({ data: { id: "session-1" } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns") && method === "POST") {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: { status: "running" }
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1")) {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: {
+              status: "done",
+              output: {
+                content: JSON.stringify({
+                  summary: "The upgrade appears to require an API migration.",
+                  likelyCause: "A removed API is still imported.",
+                  nextRepairAction: "Update imports and rerun the deterministic checks."
+                })
+              },
+              required_actions: []
+            }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    const result = await client.runNpmUpgradeRepairHandoff({
+      repositoryUrl: "https://github.com/acme/demo",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      verificationResult: {
+        status: "FAILED",
+        commands: [
+          { command: "npm install react@19.0.0", exitCode: 0, durationMs: 10, output: "ok" },
+          { command: "npm run test", exitCode: 1, durationMs: 20, output: "removed API" }
+        ],
+        skippedScripts: [],
+        modelRepairRequired: true,
+        runtimeChangeRequired: false
+      }
+    });
+
+    const sessionRequest = requests.find(
+      (request) => request.url.endsWith("/api/v1/sessions") && request.method === "POST"
+    );
+    const turnRequest = requests.find(
+      (request) =>
+        request.url.endsWith("/api/v1/sessions/session-1/turns") && request.method === "POST"
+    );
+
+    expect(result).toMatchObject({
+      status: "completed",
+      sessionId: "session-1",
+      turnId: "turn-1"
+    });
+    expect(result.summary).toContain("API migration");
+    expect(sessionRequest?.body).toMatchObject({
+      agent: {
+        spec: {
+          model: {
+            name: "google-gemini/gemini-3-6-flash",
+            params: {
+              temperature: 0,
+              parallel_tool_calls: false,
+              tool_choice: "none"
+            }
+          },
+          config: {
+            iteration_limit: 5,
+            sandbox: { enabled: false },
+            dynamic_sub_agents: { enabled: false },
+            generative_ui: { enabled: false },
+            ask_user_questions: { enabled: false },
+            current_date_time: { enabled: false }
+          }
+        }
+      }
+    });
+    expect(JSON.stringify(turnRequest?.body)).toContain("Do not run commands or use tools.");
+  });
+
+  it("includes recent TrueForge events when a repair handoff reaches the iteration limit", async () => {
+    vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+
+      if (href.endsWith("/api/v1/models")) {
+        return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
+      }
+
+      if (href.endsWith("/api/v1/sessions") && method === "POST") {
+        return Response.json({ data: { id: "session-1" } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns") && method === "POST") {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: { status: "running" }
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1")) {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: {
+              status: "error",
+              message: "You have reached iteration limit of 5, please request again"
+            }
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1/events?limit=100")) {
+        return Response.json({
+          data: [
+            {
+              type: "turn.created",
+              id: "event-1",
+              turn_id: "turn-1",
+              state: { status: "running" }
+            },
+            {
+              type: "model.message",
+              id: "event-2",
+              content: "I will inspect the provided failure evidence.",
+              finish_reason: "tool_calls",
+              usage: { input_tokens: 100, output_tokens: 20 }
+            },
+            {
+              type: "turn.done",
+              id: "event-3",
+              state: {
+                status: "error",
+                message: "You have reached iteration limit of 5, please request again"
+              }
+            }
+          ],
+          pagination: { next_page_token: null }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    const result = await client.runNpmUpgradeRepairHandoff({
+      repositoryUrl: "https://github.com/acme/demo",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      verificationResult: {
+        status: "FAILED",
+        commands: [{ command: "npm run test", exitCode: 1, durationMs: 20, output: "failed" }],
+        skippedScripts: [],
+        modelRepairRequired: true,
+        runtimeChangeRequired: false
+      }
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.sessionId).toBe("session-1");
+    expect(result.turnId).toBe("turn-1");
+    expect(result.summary).toContain("Recent TrueForge turn events");
+    expect(result.summary).toContain("[model.message] I will inspect");
+    expect(result.summary).toContain("tokens=100/20");
   });
 });
 
@@ -374,6 +580,114 @@ describe("TrueForgeSandboxProvider", () => {
 
     expect(result.overallStatus).toBe("FAILED");
     expect(result.commands.find((command) => command.command === "npm ci")?.exitCode).toBe(1);
+  });
+
+  it("runs deterministic npm upgrade verification through the sandbox endpoint", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+
+      if (href.endsWith("/healthz")) {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      if (href.endsWith("/api/v1/settings/sandbox-providers")) {
+        return Response.json({
+          data: {
+            manifest: { type: "daytona" },
+            status: "ready",
+            status_reason: null
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs")) {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          repository_url: "https://github.com/acme/demo",
+          package_manager: "npm",
+          package_name: "react",
+          target_version: "19.0.0"
+        });
+
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-upgrade.sh",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_UPGRADE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "PASSED",
+                upgradeStatus: "VERIFIED",
+                upgrade: {
+                  modelRepairRequired: false,
+                  runtimeChangeRequired: false
+                },
+                package: {
+                  skippedScripts: ["lint"]
+                },
+                commands: [
+                  {
+                    command: "git clone --depth 1 https://github.com/acme/demo repo",
+                    exitCode: 0,
+                    durationMs: 10,
+                    output: ""
+                  },
+                  {
+                    command: "npm install react@19.0.0",
+                    exitCode: 0,
+                    durationMs: 20,
+                    output: "changed 1 package"
+                  },
+                  { command: "npm ci", exitCode: 0, durationMs: 30, output: "installed" },
+                  { command: "npm run test", exitCode: 0, durationMs: 40, output: "passed" }
+                ]
+              }),
+              "UPGRADEPILOT_UPGRADE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "deleted" }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    const result = await client.runNpmUpgradeSandbox({
+      repositoryUrl: "https://github.com/acme/demo",
+      packageManager: "npm",
+      packageName: "react",
+      targetVersion: "19.0.0"
+    });
+
+    expect(result.status).toBe("VERIFIED");
+    expect(result.modelRepairRequired).toBe(false);
+    expect(result.runtimeChangeRequired).toBe(false);
+    expect(result.commands.map((command) => command.command)).toContain("npm install react@19.0.0");
+  });
+
+  it("parses upgrade workflow failures that require repair handoff", () => {
+    const result = parseUpgradeWorkflowResult(
+      [
+        "UPGRADEPILOT_UPGRADE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "FAILED",
+          upgradeStatus: "FAILED",
+          upgrade: {
+            modelRepairRequired: true,
+            runtimeChangeRequired: false
+          },
+          commands: [{ command: "npm run test", exitCode: 1, durationMs: 10, output: "failed" }]
+        }),
+        "UPGRADEPILOT_UPGRADE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.upgradeStatus).toBe("FAILED");
+    expect(result.upgrade?.modelRepairRequired).toBe(true);
   });
 
   it("accepts blocked deterministic workflow results", () => {

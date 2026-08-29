@@ -3,6 +3,10 @@ import {
   buildNpmBaselineTurnPrompt,
   UPGRADEPILOT_BASELINE_RESULT_MARKER
 } from "@/lib/trueforge-baseline-workflow";
+import type {
+  UpgradeRepairHandoffResult,
+  UpgradeVerificationResult
+} from "@/lib/upgrade-run-store";
 import {
   listMissingVerificationScripts,
   truncateCommandOutput,
@@ -28,6 +32,9 @@ type TrueForgeClientOptions = {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
 };
+
+let nextRepairTurnAllowedAt = 0;
+let repairTurnQueue = Promise.resolve();
 
 type HealthResponse = {
   status: string;
@@ -80,10 +87,7 @@ type TrueForgeModelMessage = {
 };
 
 type TurnEventsResponse = {
-  data: Array<{
-    type: string;
-    content?: string | Array<{ type?: string; text?: string }> | null;
-  }>;
+  data: Array<Record<string, unknown>>;
   pagination?: {
     next_page_token?: string | null;
   };
@@ -102,6 +106,8 @@ type NpmBaselineSandboxRunResponse = {
   };
 };
 
+type NpmUpgradeSandboxRunResponse = NpmBaselineSandboxRunResponse;
+
 type TrueForgeBaselineWorkflowResult = {
   overallStatus: BaselineStatus;
   runtime?: {
@@ -118,10 +124,38 @@ type TrueForgeBaselineWorkflowResult = {
   commands: CommandResult[];
 };
 
+type TrueForgeUpgradeWorkflowResult = {
+  overallStatus: BaselineStatus;
+  upgradeStatus: "VERIFIED" | "FAILED" | "BLOCKED";
+  upgrade?: {
+    modelRepairRequired?: boolean;
+    runtimeChangeRequired?: boolean;
+  };
+  package?: {
+    skippedScripts?: VerificationScriptName[];
+  };
+  commands: CommandResult[];
+};
+
+const UPGRADEPILOT_UPGRADE_RESULT_MARKER = "UPGRADEPILOT_UPGRADE_RESULT";
+const DEFAULT_REPAIR_TURN_INTERVAL_MS = 15_000;
+const DEFAULT_REPAIR_BACKOFF_MS = 20_000;
+
 export class TrueForgeIntegrationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "TrueForgeIntegrationError";
+  }
+}
+
+class TrueForgeTurnExecutionError extends TrueForgeIntegrationError {
+  readonly sessionId: string;
+  readonly turnId: string;
+
+  constructor(message: string, input: { sessionId: string; turnId: string; cause?: unknown }) {
+    super(message, { cause: input.cause });
+    this.sessionId = input.sessionId;
+    this.turnId = input.turnId;
   }
 }
 
@@ -297,6 +331,171 @@ export class TrueForgeClient {
     return mapBaselineWorkflowResult(workflowResult, input.scripts);
   }
 
+  async runNpmUpgradeSandbox(input: {
+    repositoryUrl: string;
+    packageManager: VerificationPackageManager;
+    packageName: string;
+    targetVersion: string;
+  }): Promise<UpgradeVerificationResult> {
+    const health = await this.getHealth();
+    const sandboxProvider = await this.getSandboxProviderStatus();
+
+    if (!sandboxProvider || sandboxProvider.status !== "ready") {
+      throw new TrueForgeIntegrationError(
+        sandboxProvider
+          ? `TrueForge ${health.version} sandbox provider ${sandboxProvider.type} is ${sandboxProvider.status}: ${sandboxProvider.statusReason ?? "no reason provided"}.`
+          : `TrueForge ${health.version} is reachable, but no sandbox provider is configured.`
+      );
+    }
+
+    const run = await this.postJson<NpmUpgradeSandboxRunResponse>(
+      "/api/v1/sandboxes/npm-upgrade-runs",
+      {
+        repository_url: input.repositoryUrl,
+        package_manager: input.packageManager,
+        package_name: input.packageName,
+        target_version: input.targetVersion,
+        timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_UPGRADE_TIMEOUT_SECONDS", 10 * 60)
+      }
+    );
+
+    if (run.data.cleanup.status === "failed") {
+      throw new TrueForgeIntegrationError(
+        `TrueForge upgrade sandbox cleanup failed: ${run.data.cleanup.error ?? "unknown cleanup error"}.`
+      );
+    }
+
+    const workflowResult = parseUpgradeWorkflowResult(run.data.output, {
+      command: run.data.command,
+      exitCode: run.data.exit_code
+    });
+
+    return mapUpgradeWorkflowResult(workflowResult);
+  }
+
+  async runNpmUpgradeRepairHandoff(input: {
+    repositoryUrl: string;
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    verificationResult: UpgradeVerificationResult;
+  }): Promise<UpgradeRepairHandoffResult> {
+    const maxAttempts = readPositiveIntegerEnv("TRUEFORGE_REPAIR_MAX_ATTEMPTS", 2);
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await waitForRepairTurnSlot(
+          readNonNegativeIntegerEnv(
+            "TRUEFORGE_REPAIR_MIN_INTERVAL_MS",
+            DEFAULT_REPAIR_TURN_INTERVAL_MS
+          )
+        );
+
+        return await this.createUpgradeRepairTurn(input);
+      } catch (error) {
+        lastError = error;
+
+        if (!isRateLimitError(error) || attempt === maxAttempts) {
+          break;
+        }
+
+        await sleep(
+          readPositiveIntegerEnv("TRUEFORGE_REPAIR_BACKOFF_MS", DEFAULT_REPAIR_BACKOFF_MS)
+        );
+      }
+    }
+
+    return {
+      status: "failed",
+      summary:
+        lastError instanceof Error
+          ? `TrueForge repair agent handoff failed: ${lastError.message}`
+          : "TrueForge repair agent handoff failed.",
+      sessionId: lastError instanceof TrueForgeTurnExecutionError ? lastError.sessionId : null,
+      turnId: lastError instanceof TrueForgeTurnExecutionError ? lastError.turnId : null
+    };
+  }
+
+  private async createUpgradeRepairTurn(input: {
+    repositoryUrl: string;
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    verificationResult: UpgradeVerificationResult;
+  }): Promise<UpgradeRepairHandoffResult> {
+    const modelName = await this.getDefaultModelName();
+    const session = await this.postJson<SessionResponse>("/api/v1/sessions", {
+      agent: {
+        spec: {
+          model: {
+            name: modelName,
+            params: {
+              temperature: 0,
+              reasoning_effort: process.env.TRUEFORGE_REPAIR_REASONING_EFFORT ?? "low",
+              parallel_tool_calls: false,
+              tool_choice: "none",
+              max_tokens: readPositiveIntegerEnv("TRUEFORGE_REPAIR_MAX_TOKENS", 800)
+            }
+          },
+          instructions: [
+            "You are the UpgradePilot dependency repair handoff agent.",
+            "You receive deterministic verification evidence after an attempted dependency upgrade.",
+            "Do not call tools, run commands, edit files, create pull requests, or claim a repair was applied.",
+            "Answer immediately from the evidence in the user's message.",
+            "Diagnose the likely compatibility issue from the provided evidence only.",
+            "Return concise JSON with summary, likelyCause, nextRepairAction, and confidence."
+          ].join(" "),
+          response_format: { type: "json_object" },
+          config: {
+            iteration_limit: readIntegerEnvAtLeast("TRUEFORGE_REPAIR_ITERATION_LIMIT", 5, 5),
+            sandbox: { enabled: false, file_downloads: false },
+            dynamic_sub_agents: { enabled: false },
+            generative_ui: { enabled: false },
+            ask_user_questions: { enabled: false },
+            current_date_time: { enabled: false }
+          }
+        }
+      }
+    });
+    const turn = await this.postJson<TurnResponse>(
+      `/api/v1/sessions/${encodeURIComponent(session.data.id)}/turns`,
+      {
+        input: [
+          {
+            type: "user.message",
+            content: buildUpgradeRepairHandoffPrompt(input)
+          }
+        ],
+        previous_turn_id: "none",
+        stream: false
+      }
+    );
+    let completedTurn: TurnResponse["data"];
+
+    try {
+      completedTurn = await this.waitForTurn(session.data.id, turn.data.id);
+    } catch (error) {
+      throw new TrueForgeTurnExecutionError(
+        error instanceof Error ? error.message : "TrueForge repair turn failed.",
+        {
+          sessionId: session.data.id,
+          turnId: turn.data.id,
+          cause: error
+        }
+      );
+    }
+
+    const summary = extractRepairSummary(completedTurn);
+
+    return {
+      status: "completed",
+      summary,
+      sessionId: session.data.id,
+      turnId: turn.data.id
+    };
+  }
+
   private async waitForTurn(sessionId: string, turnId: string): Promise<TurnResponse["data"]> {
     const timeoutMs = Number(process.env.TRUEFORGE_TURN_TIMEOUT_MS ?? 10 * 60 * 1000);
     const startedAt = Date.now();
@@ -312,12 +511,22 @@ export class TrueForgeClient {
       }
 
       if (turn.data.state.status === "error") {
-        throw new TrueForgeIntegrationError(`TrueForge turn failed: ${turn.data.state.message}`);
+        throw new TrueForgeIntegrationError(
+          await this.describeTerminalTurnFailure({
+            sessionId,
+            turnId,
+            message: `TrueForge turn failed: ${turn.data.state.message}`
+          })
+        );
       }
 
       if (turn.data.state.status === "cancelled") {
         throw new TrueForgeIntegrationError(
-          `TrueForge turn was cancelled: ${turn.data.state.reason}`
+          await this.describeTerminalTurnFailure({
+            sessionId,
+            turnId,
+            message: `TrueForge turn was cancelled: ${turn.data.state.reason}`
+          })
         );
       }
 
@@ -331,8 +540,31 @@ export class TrueForgeClient {
     }
 
     throw new TrueForgeIntegrationError(
-      `TrueForge baseline workflow timed out after ${timeoutMs}ms.`
+      await this.describeTerminalTurnFailure({
+        sessionId,
+        turnId,
+        message: `TrueForge baseline workflow timed out after ${timeoutMs}ms.`
+      })
     );
+  }
+
+  private async describeTerminalTurnFailure(input: {
+    sessionId: string;
+    turnId: string;
+    message: string;
+  }): Promise<string> {
+    const eventDiagnostics = await this.listTurnEventDiagnostics(input.sessionId, input.turnId);
+    const recentEvents = eventDiagnostics.slice(-8);
+
+    if (recentEvents.length === 0) {
+      return input.message;
+    }
+
+    return [
+      input.message,
+      "Recent TrueForge turn events:",
+      truncateCommandOutput(recentEvents.join("\n"), 4000)
+    ].join("\n");
   }
 
   private async extractTurnWorkflowText(
@@ -362,6 +594,14 @@ export class TrueForgeClient {
   }
 
   private async listTurnEventTexts(sessionId: string, turnId: string): Promise<string[]> {
+    const diagnostics = await this.listTurnEventDiagnostics(sessionId, turnId);
+
+    return diagnostics
+      .map((diagnostic) => diagnostic.replace(/^\[[^\]]+\]\s*/, ""))
+      .filter(Boolean);
+  }
+
+  private async listTurnEventDiagnostics(sessionId: string, turnId: string): Promise<string[]> {
     const texts: string[] = [];
     let pageToken: string | null | undefined;
 
@@ -374,7 +614,7 @@ export class TrueForgeClient {
       );
 
       for (const event of response.data) {
-        const text = trueForgeContentToText(event.content);
+        const text = formatTurnEventDiagnostic(event);
 
         if (text) {
           texts.push(text);
@@ -488,6 +728,25 @@ export class TrueForgeSandboxProvider implements SandboxProvider {
     packageManager: VerificationPackageManager;
   }): Promise<BaselineVerificationResult> {
     return this.client.runNpmBaselineSandbox(input);
+  }
+
+  async runUpgrade(input: {
+    repositoryUrl: string;
+    packageManager: VerificationPackageManager;
+    packageName: string;
+    targetVersion: string;
+  }): Promise<UpgradeVerificationResult> {
+    return this.client.runNpmUpgradeSandbox(input);
+  }
+
+  async runUpgradeRepairHandoff(input: {
+    repositoryUrl: string;
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    verificationResult: UpgradeVerificationResult;
+  }): Promise<UpgradeRepairHandoffResult> {
+    return this.client.runNpmUpgradeRepairHandoff(input);
   }
 }
 
@@ -607,12 +866,66 @@ export function parseBaselineWorkflowResult(
   return parsed as TrueForgeBaselineWorkflowResult;
 }
 
+export function parseUpgradeWorkflowResult(
+  text: string,
+  context?: { command?: string; exitCode?: number }
+): TrueForgeUpgradeWorkflowResult {
+  const markerPattern = new RegExp(
+    `${UPGRADEPILOT_UPGRADE_RESULT_MARKER}_START\\s*([\\s\\S]*?)\\s*${UPGRADEPILOT_UPGRADE_RESULT_MARKER}_END`
+  );
+  const rawPayload = markerPattern.exec(text)?.[1] ?? null;
+
+  if (!rawPayload) {
+    throw new TrueForgeIntegrationError(
+      describeMissingWorkflowMarkers({
+        text,
+        context,
+        workflow: "upgrade",
+        marker: "UPGRADEPILOT_UPGRADE_RESULT"
+      })
+    );
+  }
+
+  const parsed = JSON.parse(rawPayload) as Partial<TrueForgeUpgradeWorkflowResult>;
+
+  if (
+    (parsed.upgradeStatus !== "VERIFIED" &&
+      parsed.upgradeStatus !== "FAILED" &&
+      parsed.upgradeStatus !== "BLOCKED") ||
+    !Array.isArray(parsed.commands)
+  ) {
+    throw new TrueForgeIntegrationError(
+      "TrueForge upgrade workflow returned an invalid UpgradePilot result payload."
+    );
+  }
+
+  return parsed as TrueForgeUpgradeWorkflowResult;
+}
+
 function describeMissingBaselineMarkers(
   text: string,
   context?: { command?: string; exitCode?: number }
 ): string {
+  return describeMissingWorkflowMarkers({
+    text,
+    context,
+    workflow: "baseline",
+    marker: "UPGRADEPILOT_BASELINE_RESULT"
+  });
+}
+
+function describeMissingWorkflowMarkers({
+  text,
+  context,
+  workflow
+}: {
+  text: string;
+  context?: { command?: string; exitCode?: number };
+  workflow: "baseline" | "upgrade";
+  marker: string;
+}): string {
   const details = [
-    "TrueForge baseline workflow output did not contain the UpgradePilot result markers."
+    `TrueForge ${workflow} workflow output did not contain the UpgradePilot result markers.`
   ];
 
   if (context?.command) {
@@ -630,6 +943,217 @@ function describeMissingBaselineMarkers(
   }
 
   return details.join(" ");
+}
+
+function mapUpgradeWorkflowResult(
+  result: TrueForgeUpgradeWorkflowResult
+): UpgradeVerificationResult {
+  return {
+    status: result.upgradeStatus,
+    commands: result.commands.map(normalizeCommandResult),
+    skippedScripts: result.package?.skippedScripts ?? [],
+    modelRepairRequired: result.upgrade?.modelRepairRequired ?? result.upgradeStatus === "FAILED",
+    runtimeChangeRequired:
+      result.upgrade?.runtimeChangeRequired ?? result.upgradeStatus === "BLOCKED"
+  };
+}
+
+function buildUpgradeRepairHandoffPrompt(input: {
+  repositoryUrl: string;
+  packageName: string;
+  currentVersion: string;
+  targetVersion: string;
+  verificationResult: UpgradeVerificationResult;
+}): string {
+  return JSON.stringify({
+    task: "upgradepilot_dependency_repair_handoff",
+    constraints: [
+      "Do not run commands or use tools.",
+      "Do not claim repository files were changed.",
+      "Do not decide routine verification steps; those were already executed deterministically.",
+      "If the evidence points to a runtime/install requirement, mark the next action as blocked.",
+      "Return only JSON."
+    ],
+    repository: {
+      url: input.repositoryUrl
+    },
+    dependency: {
+      name: input.packageName,
+      currentVersion: input.currentVersion,
+      targetVersion: input.targetVersion
+    },
+    deterministicVerification: {
+      status: input.verificationResult.status,
+      runtimeChangeRequired: input.verificationResult.runtimeChangeRequired,
+      modelRepairRequired: input.verificationResult.modelRepairRequired,
+      skippedScripts: input.verificationResult.skippedScripts,
+      commands: input.verificationResult.commands.map((command) => ({
+        command: command.command,
+        exitCode: command.exitCode,
+        durationMs: command.durationMs,
+        output: truncateCommandOutput(command.output, 1200)
+      }))
+    },
+    responseShape: {
+      summary: "one concise sentence",
+      likelyCause: "brief observed compatibility diagnosis",
+      nextRepairAction: "specific next repair action for a future repair implementation",
+      confidence: "low | medium | high"
+    }
+  });
+}
+
+function extractRepairSummary(turn: TurnResponse["data"]): string {
+  if (turn.state.status !== "done") {
+    return "TrueForge repair agent handoff completed without a final response.";
+  }
+
+  const text = trueForgeContentToText(turn.state.output?.content).trim();
+
+  if (!text) {
+    return "TrueForge repair agent handoff completed without a final response.";
+  }
+
+  try {
+    const parsed = JSON.parse(text) as {
+      summary?: unknown;
+      likelyCause?: unknown;
+      nextRepairAction?: unknown;
+    };
+    const details = [
+      typeof parsed.summary === "string" ? parsed.summary : null,
+      typeof parsed.likelyCause === "string" ? `Likely cause: ${parsed.likelyCause}` : null,
+      typeof parsed.nextRepairAction === "string"
+        ? `Next repair action: ${parsed.nextRepairAction}`
+        : null
+    ].filter(Boolean);
+
+    return details.length > 0
+      ? truncateCommandOutput(details.join("\n"))
+      : truncateCommandOutput(text);
+  } catch {
+    return truncateCommandOutput(text);
+  }
+}
+
+function formatTurnEventDiagnostic(event: Record<string, unknown>): string {
+  const type = typeof event.type === "string" ? event.type : "event";
+
+  if (type === "turn.created") {
+    return "[turn.created] Turn started.";
+  }
+
+  if (type === "turn.done") {
+    const state = readObject(event.state);
+    const status = typeof state?.status === "string" ? state.status : "unknown";
+    const message =
+      readString(state?.message) ?? readString(state?.reason) ?? readString(state?.error);
+
+    return `[turn.done] ${message ? `${status}: ${message}` : status}`;
+  }
+
+  if (type === "model.message") {
+    const text = trueForgeContentToText(event.content as TrueForgeModelMessage["content"]).trim();
+    const finishReason = readString(event.finish_reason);
+    const usage = formatModelUsage(readObject(event.usage));
+    const details = [text, finishReason ? `finish_reason=${finishReason}` : null, usage]
+      .filter(Boolean)
+      .join(" ");
+
+    return details ? `[model.message] ${truncateCommandOutput(details, 1000)}` : "";
+  }
+
+  if (type === "tool.response") {
+    const name = readString(event.name) ?? readString(event.tool_name) ?? "tool";
+    const content = trueForgeContentToText(event.content as TrueForgeModelMessage["content"]);
+
+    return `[tool.response] ${name}: ${truncateCommandOutput(content.trim(), 1000)}`;
+  }
+
+  if (type === "tool.response.required") {
+    return "[tool.response.required] Agent requested tool responses.";
+  }
+
+  if (type === "tool.approval.required") {
+    return "[tool.approval.required] Agent requested tool approval.";
+  }
+
+  if (type === "sandbox.created") {
+    return "[sandbox.created] Sandbox was created.";
+  }
+
+  if (type === "mcp.initialize") {
+    const serverName = readString(event.server_name) ?? readString(event.name);
+
+    return `[mcp.initialize] ${serverName ?? "MCP server initialized"}`;
+  }
+
+  const content = trueForgeContentToText(event.content as TrueForgeModelMessage["content"]).trim();
+
+  if (content) {
+    return `[${type}] ${truncateCommandOutput(content, 1000)}`;
+  }
+
+  return `[${type}] ${truncateCommandOutput(JSON.stringify(redactDiagnosticEvent(event)), 1000)}`;
+}
+
+function formatModelUsage(usage: Record<string, unknown> | null): string | null {
+  if (!usage) {
+    return null;
+  }
+
+  const inputTokens = readNumber(usage.input_tokens);
+  const outputTokens = readNumber(usage.output_tokens);
+
+  if (inputTokens === null && outputTokens === null) {
+    return null;
+  }
+
+  return `tokens=${inputTokens ?? "?"}/${outputTokens ?? "?"}`;
+}
+
+function redactDiagnosticEvent(event: Record<string, unknown>): Record<string, unknown> {
+  const redacted: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(event)) {
+    redacted[key] = /token|secret|key|authorization|password/i.test(key) ? "[redacted]" : value;
+  }
+
+  return redacted;
+}
+
+function readObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+async function waitForRepairTurnSlot(minIntervalMs: number): Promise<void> {
+  const queuedTurn = repairTurnQueue.then(async () => {
+    const waitMs = Math.max(0, nextRepairTurnAllowedAt - Date.now());
+
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    nextRepairTurnAllowedAt = Date.now() + minIntervalMs;
+  });
+
+  repairTurnQueue = queuedTurn.catch(() => undefined);
+
+  await queuedTurn;
+}
+
+function isRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+
+  return /429|rate.?limit|quota|resource_exhausted/i.test(message);
 }
 
 function parseResultTextWrapper(text: string): string | null {
@@ -700,4 +1224,28 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(rawValue);
 
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const rawValue = process.env[name];
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readIntegerEnvAtLeast(name: string, fallback: number, minimum: number): number {
+  const rawValue = process.env[name];
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
