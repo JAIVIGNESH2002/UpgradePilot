@@ -20,11 +20,11 @@ describe("baseline run store", () => {
     vi.useRealTimers();
   });
 
-  it("returns pollable running snapshots one active step at a time", async () => {
+  it("keeps pollable running snapshots on the current backend step", async () => {
     const runVerification = vi.fn(
       () =>
         new Promise<never>(() => {
-          // Keep the run open so polling snapshots can advance.
+          // Keep the run open so polling snapshots cannot receive new command evidence.
         })
     );
 
@@ -42,10 +42,12 @@ describe("baseline run store", () => {
     expect(started.baseline.steps[2]).toMatchObject({ name: "Lint", status: "pending" });
 
     vi.setSystemTime(new Date("2026-08-28T10:00:04Z"));
-    expect(getBaselineRun(started.id)?.baseline.steps[2]).toMatchObject({
-      name: "Lint",
-      status: "running"
+    expect(getBaselineRun(started.id)?.baseline.steps[0]).toMatchObject({
+      name: "Install dependencies",
+      status: "running",
+      output: "Waiting for TrueForge sandbox command output..."
     });
+    expect(getBaselineRun(started.id)?.baseline.steps[2]).toMatchObject({ status: "pending" });
   });
 
   it("replaces planned progress with real command evidence when completed", async () => {

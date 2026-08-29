@@ -24,8 +24,6 @@ type BaselineRunRecord = {
   id: string;
   repositoryUrl: string;
   status: "running" | "completed";
-  startedAt: number;
-  plannedSteps: WorkspaceBaselineStep[];
   baseline: WorkspaceBaseline;
 };
 
@@ -35,7 +33,6 @@ type StartBaselineRunOptions = {
 };
 
 const baselineRuns = new Map<string, BaselineRunRecord>();
-const STEP_ADVANCE_MS = 1800;
 
 export async function startBaselineRun(
   repositoryUrl: string,
@@ -66,14 +63,12 @@ export async function startBaselineRun(
     id: runId,
     repositoryUrl: trimmedRepositoryUrl,
     status: "running",
-    startedAt: Date.now(),
-    plannedSteps,
     baseline: {
       status: "unknown",
       updatedAt: null,
       commands: 0,
       message: "Baseline verification is running.",
-      steps: runningBaselineSteps(plannedSteps, 0)
+      steps: runningBaselineSteps(plannedSteps)
     }
   };
   baselineRuns.set(runId, record);
@@ -102,28 +97,11 @@ export function clearBaselineRunsForTests() {
 }
 
 function snapshotBaselineRun(record: BaselineRunRecord): BaselineRunSnapshot {
-  if (record.status === "completed") {
-    return {
-      id: record.id,
-      repositoryUrl: record.repositoryUrl,
-      status: "completed",
-      baseline: record.baseline
-    };
-  }
-
-  const activeStepIndex = Math.min(
-    Math.floor((Date.now() - record.startedAt) / STEP_ADVANCE_MS),
-    Math.max(record.plannedSteps.length - 1, 0)
-  );
-
   return {
     id: record.id,
     repositoryUrl: record.repositoryUrl,
-    status: "running",
-    baseline: {
-      ...record.baseline,
-      steps: runningBaselineSteps(record.plannedSteps, activeStepIndex)
-    }
+    status: record.status,
+    baseline: record.baseline
   };
 }
 
@@ -170,8 +148,6 @@ function completedRun({
     id,
     repositoryUrl,
     status: "completed",
-    startedAt: Date.now(),
-    plannedSteps: [],
     baseline
   };
 }
@@ -207,15 +183,29 @@ function baselinePlannedSteps(inspection: RepositoryInspection): WorkspaceBaseli
   ];
 }
 
-function runningBaselineSteps(
-  steps: WorkspaceBaselineStep[],
-  activeStepIndex: number
-): WorkspaceBaselineStep[] {
-  return steps.map((step, index) => ({
-    ...step,
-    status:
-      step.status === "skipped" ? "skipped" : index === activeStepIndex ? "running" : "pending"
-  }));
+function runningBaselineSteps(steps: WorkspaceBaselineStep[]): WorkspaceBaselineStep[] {
+  let activated = false;
+
+  return steps.map((step) => {
+    if (step.status === "skipped") {
+      return step;
+    }
+
+    if (!activated) {
+      activated = true;
+
+      return {
+        ...step,
+        status: "running",
+        output: "Waiting for TrueForge sandbox command output..."
+      };
+    }
+
+    return {
+      ...step,
+      status: "pending"
+    };
+  });
 }
 
 function isSupportedVerificationPackageManager(

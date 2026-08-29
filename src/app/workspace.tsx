@@ -83,12 +83,13 @@ const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "major", label: "Major" },
   { value: "dev", label: "Dev" }
 ];
+const WORKFLOW_REPLAY_STEP_MS = 650;
 
 function initialThemePreference(): ThemePreference {
-  if (typeof window === "undefined") {
-    return "light";
-  }
+  return "light";
+}
 
+function resolvedThemePreference(): ThemePreference {
   const storedTheme = window.localStorage.getItem("upgradepilot-theme");
 
   if (storedTheme === "dark" || storedTheme === "light") {
@@ -96,6 +97,88 @@ function initialThemePreference(): ThemePreference {
   }
 
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function useWorkflowStepReplay<
+  TStep extends {
+    status: WorkspaceBaselineStep["status"];
+    output: string | null;
+    durationMs: number | null;
+  }
+>(steps: TStep[], { isRunning, replayKey }: { isRunning: boolean; replayKey: string }): TStep[] {
+  const [visibleCount, setVisibleCount] = useState<number | null>(null);
+  const wasRunning = useRef(false);
+  const stepEvidenceKey = steps
+    .map((step) => `${step.status}:${step.durationMs ?? ""}:${step.output?.length ?? 0}`)
+    .join("|");
+
+  useEffect(() => {
+    const shouldReplay =
+      !isRunning &&
+      wasRunning.current &&
+      steps.length > 1 &&
+      steps.some((step) => step.status === "passed" || step.status === "failed");
+    wasRunning.current = isRunning;
+
+    if (!shouldReplay || prefersReducedMotion()) {
+      setVisibleCount(null);
+      return;
+    }
+
+    setVisibleCount(0);
+
+    const timers = steps.map((_, index) =>
+      window.setTimeout(
+        () => {
+          setVisibleCount(index + 1);
+        },
+        WORKFLOW_REPLAY_STEP_MS * (index + 1)
+      )
+    );
+
+    const finishTimer = window.setTimeout(
+      () => setVisibleCount(null),
+      WORKFLOW_REPLAY_STEP_MS * (steps.length + 1)
+    );
+
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      window.clearTimeout(finishTimer);
+    };
+  }, [isRunning, replayKey, stepEvidenceKey, steps]);
+
+  if (visibleCount === null) {
+    return steps;
+  }
+
+  return steps.map((step, index) => {
+    if (index < visibleCount) {
+      return step;
+    }
+
+    if (index === visibleCount && step.status !== "pending" && step.status !== "skipped") {
+      return {
+        ...step,
+        status: "running",
+        durationMs: null,
+        output: "Applying verified workflow evidence..."
+      };
+    }
+
+    return {
+      ...step,
+      status: step.status === "skipped" ? "skipped" : "pending",
+      durationMs: null,
+      output: step.status === "skipped" ? step.output : null
+    };
+  });
+}
+
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
 }
 
 export function RepositoryWorkspace() {
@@ -120,8 +203,27 @@ export function RepositoryWorkspace() {
   const [filter, setFilter] = useState<DependencyFilter>("all");
   const [hasLoadedWorkspace, setHasLoadedWorkspace] = useState(false);
   const refreshAttemptedRepositoryIds = useRef<Set<string>>(new Set());
+  const hasResolvedTheme = useRef(false);
+
+  function updateTheme(nextTheme: ThemePreference) {
+    hasResolvedTheme.current = true;
+    setTheme(nextTheme);
+  }
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      hasResolvedTheme.current = true;
+      setTheme(resolvedThemePreference());
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!hasResolvedTheme.current) {
+      return;
+    }
+
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem("upgradepilot-theme", theme);
   }, [theme]);
@@ -604,7 +706,7 @@ export function RepositoryWorkspace() {
         />
 
         <section className="min-w-0">
-          <TopHeader theme={theme} onThemeChange={setTheme} />
+          <TopHeader theme={theme} onThemeChange={updateTheme} />
           {hasLoadedWorkspace && activeUpgradeRun !== null && selectedRepository !== null ? (
             <UpgradeRunDetail
               repository={selectedRepository}
@@ -819,8 +921,13 @@ function UpgradeRunDetail({
   pullRequestState: PullRequestState;
   onCreatePullRequest: (run: UpgradeRunSnapshot) => void;
 }) {
-  const progressValue = upgradeRunProgressValue(run);
   const isRunning = run.status === "running";
+  const displayedSteps = useWorkflowStepReplay(run.steps, {
+    isRunning,
+    replayKey: `${run.id}:${run.status}:${run.updatedAt ?? "running"}`
+  });
+  const displayedRun = { ...run, steps: displayedSteps };
+  const progressValue = upgradeRunProgressValue(displayedRun);
   const canCreatePullRequest =
     run.status === "completed" &&
     run.outcome === "verified" &&
@@ -905,7 +1012,7 @@ function UpgradeRunDetail({
           />
         </div>
         <ol className="divide-y divide-border">
-          {run.steps.map((step, index) => (
+          {displayedSteps.map((step, index) => (
             <li
               key={`${step.name}:${index}`}
               className="px-4 py-4 transition-colors hover:bg-secondary/35"
@@ -1128,8 +1235,15 @@ function BaselinePanel({
   const isUnsupported = repository.package.packageManager.support === "unsupported";
   const [isExpanded, setIsExpanded] = useState(false);
   const steps = runningBaseline?.steps ?? repository.baseline.steps;
+  const displayedSteps = useWorkflowStepReplay(steps, {
+    isRunning,
+    replayKey: `${repository.id}:${repository.baseline.status}:${repository.baseline.updatedAt ?? "unknown"}`
+  });
   const hasSteps = steps.length > 0;
-  const progressValue = baselineProgressValue(isRunning, runningBaseline ?? repository.baseline);
+  const progressValue = baselineProgressValue(isRunning, {
+    ...(runningBaseline ?? repository.baseline),
+    steps: displayedSteps
+  });
 
   useEffect(() => {
     if (!isRunning) {
@@ -1209,7 +1323,7 @@ function BaselinePanel({
             />
           </div>
           <ol className="divide-y divide-border">
-            {steps.map((step) => (
+            {displayedSteps.map((step) => (
               <li
                 key={`${step.name}:${step.command}`}
                 className="px-4 py-3 transition-colors hover:bg-secondary/40"

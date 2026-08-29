@@ -66,7 +66,7 @@ export type UpgradeRepairHandoffResult = {
 };
 
 type UpgradeRunRecord = UpgradeRunSnapshot & {
-  startedAtMs: number;
+  startedAtMs?: number;
 };
 
 type StartUpgradeRunInput = {
@@ -97,7 +97,6 @@ type StartUpgradeRunOptions = {
 };
 
 const upgradeRuns = new Map<string, UpgradeRunRecord>();
-const STEP_ADVANCE_MS = 1600;
 
 export function startUpgradeRun(
   input: StartUpgradeRunInput,
@@ -107,7 +106,6 @@ export function startUpgradeRun(
   const packageName = input.packageName.trim();
   const targetVersion = input.targetVersion.trim();
   const currentVersion = input.currentVersion.trim();
-  const now = Date.now();
   const runId = randomUUID();
 
   if (repositoryUrl === "" || packageName === "" || targetVersion === "" || currentVersion === "") {
@@ -162,12 +160,11 @@ export function startUpgradeRun(
     status: "running",
     outcome: null,
     message: "Running deterministic upgrade verification through TrueForge.",
-    steps: runningUpgradeSteps(steps, 0),
-    startedAt: new Date(now).toISOString(),
+    steps: runningUpgradeSteps(steps),
+    startedAt: new Date().toISOString(),
     updatedAt: null,
     changedFiles: [],
-    pullRequest: null,
-    startedAtMs: now
+    pullRequest: null
   };
 
   upgradeRuns.set(runId, record);
@@ -222,19 +219,7 @@ export function markUpgradeRunPullRequest(
 }
 
 function snapshotUpgradeRun(record: UpgradeRunRecord): UpgradeRunSnapshot {
-  if (record.status === "completed") {
-    return sanitizeRecord(record);
-  }
-
-  const activeStepIndex = Math.min(
-    Math.floor((Date.now() - record.startedAtMs) / STEP_ADVANCE_MS),
-    Math.max(record.steps.length - 1, 0)
-  );
-
-  return {
-    ...sanitizeRecord(record),
-    steps: runningUpgradeSteps(record.steps, activeStepIndex)
-  };
+  return sanitizeRecord(record);
 }
 
 async function completeUpgradeRun({
@@ -320,11 +305,7 @@ async function completeUpgradeRun({
     record.outcome = "interrupted";
     record.message =
       error instanceof Error ? error.message : "Upgrade verification was interrupted.";
-    record.steps = record.steps.map((step, index) => ({
-      ...step,
-      status: index === 0 ? "failed" : step.status,
-      output: index === 0 ? record.message : step.output
-    }));
+    record.steps = interruptedUpgradeSteps(record.steps, record.message);
   } finally {
     record.updatedAt = new Date().toISOString();
     upgradeRuns.set(runId, record);
@@ -387,7 +368,7 @@ function completedRun({
     pullRequest: null
   };
 
-  upgradeRuns.set(id, { ...snapshot, startedAtMs: Date.now() });
+  upgradeRuns.set(id, snapshot);
 
   return snapshot;
 }
@@ -445,18 +426,55 @@ function plannedUpgradeSteps({
   ];
 }
 
-function runningUpgradeSteps(steps: UpgradeRunStep[], activeStepIndex: number): UpgradeRunStep[] {
-  return steps.map((step, index) => ({
-    ...step,
-    status:
-      step.status === "skipped"
-        ? "skipped"
-        : index < activeStepIndex
-          ? "passed"
-          : index === activeStepIndex
-            ? "running"
-            : "pending"
-  }));
+function runningUpgradeSteps(steps: UpgradeRunStep[]): UpgradeRunStep[] {
+  let activated = false;
+
+  return steps.map((step) => {
+    if (step.name === "Check baseline") {
+      return {
+        ...step,
+        status: "passed",
+        output: "Healthy baseline was available before upgrade verification."
+      };
+    }
+
+    if (step.status === "skipped") {
+      return step;
+    }
+
+    if (!activated) {
+      activated = true;
+
+      return {
+        ...step,
+        status: "running",
+        output: "Waiting for TrueForge deterministic upgrade workflow output..."
+      };
+    }
+
+    return {
+      ...step,
+      status: "pending"
+    };
+  });
+}
+
+function interruptedUpgradeSteps(steps: UpgradeRunStep[], message: string): UpgradeRunStep[] {
+  let markedFailure = false;
+
+  return steps.map((step) => {
+    if (!markedFailure && step.status === "running") {
+      markedFailure = true;
+
+      return {
+        ...step,
+        status: "failed",
+        output: message
+      };
+    }
+
+    return step;
+  });
 }
 
 function completedUpgradeSteps(
