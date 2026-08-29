@@ -37,13 +37,12 @@ import {
   type WorkspaceRepository
 } from "@/lib/repository-workspace";
 import { cn } from "@/lib/utils";
-import { VERIFICATION_SCRIPT_ORDER, scriptCommandForPackageManager } from "@/lib/verification";
 
 type AddRepositoryState =
   { status: "idle" } | { status: "loading" } | { status: "error"; message: string };
 type BaselineActionState =
   | { status: "idle" }
-  | { status: "running"; repositoryId: string }
+  | { status: "running"; repositoryId: string; baseline: WorkspaceRepository["baseline"] }
   | { status: "error"; repositoryId: string; message: string };
 type UpgradePreparationState =
   | { status: "idle" }
@@ -54,6 +53,15 @@ type RepositoryRefreshState =
   | { status: "idle" }
   | { status: "loading"; repositoryId: string }
   | { status: "error"; repositoryId: string; message: string };
+type BaselineRunResponse = {
+  run?: {
+    id: string;
+    repositoryUrl: string;
+    status: "running" | "completed";
+    baseline: WorkspaceRepository["baseline"];
+  };
+  message?: string;
+};
 
 const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -265,40 +273,63 @@ export function RepositoryWorkspace() {
   }
 
   async function runBaseline(repository: WorkspaceRepository) {
-    setBaselineActionState({ status: "running", repositoryId: repository.id });
-
     try {
-      const response = await fetch("/api/repositories/baseline", {
+      const startResponse = await fetch("/api/repositories/baseline/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repositoryUrl: repository.repositoryUrl })
       });
-      const body = (await response.json()) as {
-        baseline?: WorkspaceRepository["baseline"];
-        message?: string;
-      };
+      const startedRun = await parseBaselineRunResponse(startResponse);
 
-      if (!response.ok || body.baseline === undefined) {
-        throw new Error(body.message ?? "Baseline verification failed to start.");
+      if (startedRun.status === "completed") {
+        setRepositoryBaseline(repository.id, startedRun.baseline);
+        setBaselineActionState({ status: "idle" });
+        return startedRun.baseline;
       }
 
-      const baseline = body.baseline;
+      setBaselineActionState({
+        status: "running",
+        repositoryId: repository.id,
+        baseline: startedRun.baseline
+      });
 
-      setRepositories((currentRepositories) =>
-        currentRepositories.map((currentRepository) =>
-          currentRepository.id === repository.id
-            ? { ...currentRepository, baseline }
-            : currentRepository
-        )
-      );
+      let currentRun = startedRun;
+
+      while (currentRun.status === "running") {
+        await wait(1000);
+        const statusResponse = await fetch(
+          `/api/repositories/baseline/runs/status?runId=${encodeURIComponent(currentRun.id)}`
+        );
+        currentRun = await parseBaselineRunResponse(statusResponse);
+
+        if (currentRun.status === "running") {
+          setBaselineActionState({
+            status: "running",
+            repositoryId: repository.id,
+            baseline: currentRun.baseline
+          });
+        }
+      }
+
+      setRepositoryBaseline(repository.id, currentRun.baseline);
       setBaselineActionState({ status: "idle" });
-      return baseline;
+      return currentRun.baseline;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Baseline verification failed to start.";
       setBaselineActionState({ status: "error", repositoryId: repository.id, message });
       return null;
     }
+  }
+
+  function setRepositoryBaseline(repositoryId: string, baseline: WorkspaceRepository["baseline"]) {
+    setRepositories((currentRepositories) =>
+      currentRepositories.map((currentRepository) =>
+        currentRepository.id === repositoryId
+          ? { ...currentRepository, baseline }
+          : currentRepository
+      )
+    );
   }
 
   async function prepareVerifyUpgrade(
@@ -326,6 +357,20 @@ export function RepositoryWorkspace() {
       dependencyName: dependency.packageName,
       message: `${dependency.packageName} can open an upgrade run targeting ${dependency.latestVersion}.`
     });
+  }
+
+  async function parseBaselineRunResponse(response: Response) {
+    const body = (await response.json()) as BaselineRunResponse;
+
+    if (!response.ok || body.run === undefined) {
+      throw new Error(body.message ?? "Baseline verification failed to start.");
+    }
+
+    return body.run;
+  }
+
+  async function wait(durationMs: number) {
+    await new Promise((resolve) => window.setTimeout(resolve, durationMs));
   }
 
   return (
@@ -670,19 +715,12 @@ function BaselinePanel({
 }) {
   const isRunning =
     baselineActionState.status === "running" && baselineActionState.repositoryId === repository.id;
+  const runningBaseline = isRunning ? baselineActionState.baseline : null;
   const isUnsupported = repository.package.packageManager.support === "unsupported";
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeStepIndex, setActiveStepIndex] = useState(0);
-  const plannedSteps = useMemo(() => baselinePlannedSteps(repository), [repository]);
-  const steps = isRunning
-    ? runningBaselineSteps(plannedSteps, activeStepIndex)
-    : repository.baseline.steps;
+  const steps = runningBaseline?.steps ?? repository.baseline.steps;
   const hasSteps = steps.length > 0;
-  const progressValue = isRunning
-    ? Math.min(((activeStepIndex + 1) / Math.max(plannedSteps.length, 1)) * 100, 96)
-    : repository.baseline.status === "healthy"
-      ? 100
-      : 0;
+  const progressValue = baselineProgressValue(isRunning, runningBaseline ?? repository.baseline);
 
   useEffect(() => {
     if (!isRunning) {
@@ -691,17 +729,10 @@ function BaselinePanel({
 
     const openTimer = window.setTimeout(() => {
       setIsExpanded(true);
-      setActiveStepIndex(0);
     }, 0);
-    const timer = window.setInterval(() => {
-      setActiveStepIndex((currentIndex) => Math.min(currentIndex + 1, plannedSteps.length - 1));
-    }, 1800);
 
-    return () => {
-      window.clearTimeout(openTimer);
-      window.clearInterval(timer);
-    };
-  }, [isRunning, plannedSteps.length]);
+    return () => window.clearTimeout(openTimer);
+  }, [isRunning]);
 
   return (
     <section className="overflow-hidden rounded-md border border-border bg-background">
@@ -1178,62 +1209,26 @@ function baselineDescription(repository: WorkspaceRepository) {
   return repository.baseline.message ?? `Baseline was interrupted${updatedAt}.`;
 }
 
-function baselinePlannedSteps(repository: WorkspaceRepository): WorkspaceBaselineStep[] {
-  const packageManager = repository.package.packageManager.name;
-
-  if (packageManager !== "npm" && packageManager !== "pnpm") {
-    return [];
-  }
-
-  const scriptSteps = VERIFICATION_SCRIPT_ORDER.map((scriptName) => ({
-    name: verificationScriptLabel(scriptName),
-    command: scriptCommandForPackageManager(packageManager, scriptName),
-    status:
-      repository.package.scripts[scriptName] === undefined
-        ? ("skipped" as const)
-        : ("pending" as const),
-    durationMs: null,
-    output:
-      repository.package.scripts[scriptName] === undefined
-        ? "Script not defined in package.json."
-        : null
-  }));
-
-  return [
-    {
-      name: "Install dependencies",
-      command: repository.package.packageManager.installCommand ?? "install",
-      status: "pending",
-      durationMs: null,
-      output: null
-    },
-    ...scriptSteps
-  ];
-}
-
-function runningBaselineSteps(
-  steps: WorkspaceBaselineStep[],
-  activeStepIndex: number
-): WorkspaceBaselineStep[] {
-  return steps.map((step, index) => ({
-    ...step,
-    status:
-      step.status === "skipped" ? "skipped" : index === activeStepIndex ? "running" : "pending"
-  }));
-}
-
-function verificationScriptLabel(scriptName: string) {
-  return scriptName === "format:check"
-    ? "Format check"
-    : scriptName.charAt(0).toUpperCase() + scriptName.slice(1);
-}
-
 function formatDuration(durationMs: number) {
   if (durationMs < 1000) {
     return `${durationMs}ms`;
   }
 
   return `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)}s`;
+}
+
+function baselineProgressValue(isRunning: boolean, baseline: WorkspaceRepository["baseline"]) {
+  if (baseline.steps.length === 0) {
+    return isRunning ? 8 : 0;
+  }
+
+  const settledSteps = baseline.steps.filter(
+    (step) => step.status === "passed" || step.status === "failed" || step.status === "skipped"
+  ).length;
+  const runningStep = baseline.steps.some((step) => step.status === "running") ? 0.65 : 0;
+  const progress = ((settledSteps + runningStep) / baseline.steps.length) * 100;
+
+  return Math.min(Math.max(progress, isRunning ? 8 : 0), isRunning ? 96 : 100);
 }
 
 function upgradePreparationMessage(upgradePreparationState: UpgradePreparationState) {
