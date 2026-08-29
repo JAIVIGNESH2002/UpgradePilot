@@ -7,7 +7,7 @@ export const VERIFICATION_SCRIPT_ORDER = [
 ] as const;
 
 export type VerificationScriptName = (typeof VERIFICATION_SCRIPT_ORDER)[number];
-export type BaselineStatus = "PASSED" | "FAILED";
+export type BaselineStatus = "PASSED" | "FAILED" | "BLOCKED";
 export type VerificationPackageManager = "npm" | "pnpm";
 
 export type VerificationPlanStep = {

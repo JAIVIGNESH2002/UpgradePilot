@@ -170,7 +170,7 @@ describe("TrueForgeSandboxProvider", () => {
     ).rejects.toThrow(TrueForgeIntegrationError);
   });
 
-  it("runs baseline verification through a TrueForge sandbox-enabled session turn", async () => {
+  it("runs baseline verification through the deterministic TrueForge sandbox API", async () => {
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
@@ -192,53 +192,31 @@ describe("TrueForgeSandboxProvider", () => {
         });
       }
 
-      if (href.endsWith("/api/v1/models")) {
-        return Response.json({ data: [{ name: "provider/model" }] });
-      }
-
-      if (href.endsWith("/api/v1/sessions")) {
-        return Response.json({ data: { id: "session-1" } }, { status: 201 });
-      }
-
-      if (href.endsWith("/api/v1/sessions/session-1/turns")) {
+      if (href.endsWith("/api/v1/sandboxes/npm-baseline-runs")) {
         return Response.json({
           data: {
-            id: "turn-1",
-            state: { status: "running" }
-          }
-        });
-      }
-
-      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1")) {
-        return Response.json({
-          data: {
-            id: "turn-1",
-            state: {
-              status: "done",
-              required_actions: [],
-              output: {
-                content: JSON.stringify({
-                  resultText: [
-                    "UPGRADEPILOT_BASELINE_RESULT_START",
-                    JSON.stringify({
-                      overallStatus: "PASSED",
-                      commands: [
-                        {
-                          command: "git clone --depth 1 https://github.com/acme/demo repo",
-                          exitCode: 0,
-                          durationMs: 4,
-                          output: ""
-                        },
-                        { command: "npm ci", exitCode: 0, durationMs: 10, output: "installed" },
-                        { command: "npm run test", exitCode: 0, durationMs: 12, output: "ok" }
-                      ],
-                      package: { skippedScripts: ["format:check", "lint", "typecheck", "build"] }
-                    }),
-                    "UPGRADEPILOT_BASELINE_RESULT_END"
-                  ].join("\n")
-                })
-              }
-            }
+            sandbox_id: "default.sandbox-1",
+            command: "node /opt/tf/tool-results/upgradepilot-baseline.js",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_BASELINE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "PASSED",
+                commands: [
+                  {
+                    command: "git clone --depth 1 https://github.com/acme/demo repo",
+                    exitCode: 0,
+                    durationMs: 4,
+                    output: ""
+                  },
+                  { command: "npm ci", exitCode: 0, durationMs: 10, output: "installed" },
+                  { command: "npm run test", exitCode: 0, durationMs: 12, output: "ok" }
+                ],
+                package: { skippedScripts: ["format:check", "lint", "typecheck", "build"] }
+              }),
+              "UPGRADEPILOT_BASELINE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "deleted" }
           }
         });
       }
@@ -260,18 +238,118 @@ describe("TrueForgeSandboxProvider", () => {
     expect(result.status).toBe("PASSED");
     expect(result.install.command).toBe("npm ci");
     expect(result.verification.map((command) => command.command)).toEqual(["npm run test"]);
+    expect(requests.map((request) => request.url)).not.toContain(
+      "http://trueforge.test/api/v1/models"
+    );
+    expect(requests.some((request) => request.url.includes("/api/v1/sessions"))).toBe(false);
     expect(
-      requests.find((request) => request.url.endsWith("/api/v1/sessions"))?.body
+      requests.find((request) => request.url.endsWith("/api/v1/sandboxes/npm-baseline-runs"))?.body
     ).toMatchObject({
-      agent: {
-        spec: {
-          config: {
-            iteration_limit: 24,
-            sandbox: { enabled: true, file_downloads: false }
-          }
-        }
-      }
+      repository_url: "https://github.com/acme/demo",
+      package_manager: "npm",
+      timeout_seconds: 600
     });
+  });
+
+  it("treats failed deterministic sandbox cleanup as an infrastructure error", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+
+      if (href.endsWith("/healthz")) {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      if (href.endsWith("/api/v1/settings/sandbox-providers")) {
+        return Response.json({
+          data: {
+            manifest: { type: "daytona" },
+            status: "ready",
+            status_reason: null
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sandboxes/npm-baseline-runs")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "node /opt/tf/tool-results/upgradepilot-baseline.js",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_BASELINE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "PASSED",
+                commands: [{ command: "npm ci", exitCode: 0, durationMs: 10, output: "installed" }]
+              }),
+              "UPGRADEPILOT_BASELINE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "failed", error: "delete failed" }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(
+      client.runNpmBaselineSandbox({
+        repositoryUrl: "https://github.com/acme/demo",
+        scripts: {},
+        packageManager: "npm"
+      })
+    ).rejects.toThrow("TrueForge baseline sandbox cleanup failed: delete failed.");
+  });
+
+  it("reports deterministic sandbox bootstrap output when result markers are missing", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+
+      if (href.endsWith("/healthz")) {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      if (href.endsWith("/api/v1/settings/sandbox-providers")) {
+        return Response.json({
+          data: {
+            manifest: { type: "daytona" },
+            status: "ready",
+            status_reason: null
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sandboxes/npm-baseline-runs")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "node /opt/tf/tool-results/upgradepilot-baseline.js",
+            exit_code: 1,
+            output: "node: command not found",
+            cleanup: { status: "deleted" }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(
+      client.runNpmBaselineSandbox({
+        repositoryUrl: "https://github.com/acme/demo",
+        scripts: {},
+        packageManager: "npm"
+      })
+    ).rejects.toThrow(
+      "TrueForge baseline workflow output did not contain the UpgradePilot result markers. Command: node /opt/tf/tool-results/upgradepilot-baseline.js. Exit code: 1. Output: node: command not found"
+    );
   });
 
   it("maps an install failure from the workflow without running verification commands", async () => {
@@ -296,6 +374,28 @@ describe("TrueForgeSandboxProvider", () => {
 
     expect(result.overallStatus).toBe("FAILED");
     expect(result.commands.find((command) => command.command === "npm ci")?.exitCode).toBe(1);
+  });
+
+  it("accepts blocked deterministic workflow results", () => {
+    const result = parseBaselineWorkflowResult(
+      [
+        "UPGRADEPILOT_BASELINE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "BLOCKED",
+          commands: [
+            {
+              command: "npm ci",
+              exitCode: 1,
+              durationMs: 10,
+              output: "npm error code EBADENGINE"
+            }
+          ]
+        }),
+        "UPGRADEPILOT_BASELINE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.overallStatus).toBe("BLOCKED");
   });
 
   it("rejects malformed baseline workflow output", () => {

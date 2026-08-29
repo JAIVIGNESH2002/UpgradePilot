@@ -31,11 +31,24 @@ describe("POST /api/repositories/baseline", () => {
     });
 
     const response = await POST(makeRequest("https://github.com/acme/widgets"));
-    const body = (await response.json()) as { baseline: { status: string; commands: number } };
+    const body = (await response.json()) as {
+      baseline: {
+        status: string;
+        commands: number;
+        steps: Array<{ name: string; status: string }>;
+      };
+    };
 
     expect(response.status).toBe(200);
     expect(body.baseline.status).toBe("healthy");
     expect(body.baseline.commands).toBe(2);
+    expect(body.baseline.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Install dependencies", status: "passed" }),
+        expect.objectContaining({ name: "Test", status: "passed" }),
+        expect.objectContaining({ name: "Format check", status: "skipped" })
+      ])
+    );
     expect(runBaselineVerificationMock).toHaveBeenCalledWith(
       expect.objectContaining({
         repositoryUrl: "https://github.com/acme/widgets",
@@ -59,12 +72,58 @@ describe("POST /api/repositories/baseline", () => {
     });
 
     const response = await POST(makeRequest("https://github.com/acme/widgets"));
-    const body = (await response.json()) as { baseline: { status: string; commands: number } };
+    const body = (await response.json()) as {
+      baseline: {
+        status: string;
+        commands: number;
+        message: string;
+        steps: Array<{ name: string; status: string; output: string | null }>;
+      };
+    };
 
     expect(body.baseline.status).toBe("failed");
     expect(body.baseline.commands).toBe(2);
+    expect(body.baseline.message).toContain("pnpm run test exited with code 1");
+    expect(body.baseline.message).toContain("fail");
+    expect(body.baseline.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Install dependencies", status: "passed" }),
+        expect.objectContaining({ name: "Test", status: "failed", output: "fail" })
+      ])
+    );
     expect(runBaselineVerificationMock).toHaveBeenCalledWith(
       expect.objectContaining({ packageManager: "pnpm" })
+    );
+  });
+
+  it("returns interrupted command output for deterministic runtime blockers", async () => {
+    inspectPublicNpmRepositoryMock.mockResolvedValue(makeRepositoryInspection("npm"));
+    runBaselineVerificationMock.mockResolvedValue({
+      status: "BLOCKED",
+      install: {
+        command: "npm ci",
+        exitCode: 127,
+        durationMs: 0,
+        output:
+          "Node.js is not available in the sandbox image; cannot run npm ci or repository verification scripts."
+      },
+      verification: [],
+      skippedScripts: ["format:check", "lint", "typecheck", "test", "build"]
+    });
+
+    const response = await POST(makeRequest("https://github.com/acme/widgets"));
+    const body = (await response.json()) as {
+      baseline: { status: string; commands: number; message: string; steps: Array<unknown> };
+    };
+
+    expect(body.baseline.status).toBe("interrupted");
+    expect(body.baseline.commands).toBe(1);
+    expect(body.baseline.message).toContain("npm ci exited with code 127");
+    expect(body.baseline.message).toContain("Node.js is not available in the sandbox image");
+    expect(body.baseline.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Install dependencies", status: "failed" })
+      ])
     );
   });
 
@@ -72,10 +131,13 @@ describe("POST /api/repositories/baseline", () => {
     inspectPublicNpmRepositoryMock.mockResolvedValue(makeRepositoryInspection("yarn"));
 
     const response = await POST(makeRequest("https://github.com/acme/widgets"));
-    const body = (await response.json()) as { baseline: { status: string; message: string } };
+    const body = (await response.json()) as {
+      baseline: { status: string; message: string; steps: Array<unknown> };
+    };
 
     expect(body.baseline.status).toBe("interrupted");
     expect(body.baseline.message).toContain("yarn projects");
+    expect(body.baseline.steps).toEqual([]);
     expect(runBaselineVerificationMock).not.toHaveBeenCalled();
   });
 });

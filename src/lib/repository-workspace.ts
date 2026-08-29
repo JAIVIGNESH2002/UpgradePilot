@@ -11,11 +11,22 @@ export const REPOSITORY_WORKSPACE_STORAGE_KEY = "upgradepilot.repositories.v1";
 
 export type WorkspaceRepositoryStatus = "unknown" | "healthy" | "failed" | "interrupted";
 
+export type WorkspaceBaselineStepStatus = "pending" | "running" | "passed" | "failed" | "skipped";
+
+export type WorkspaceBaselineStep = {
+  name: string;
+  command: string;
+  status: WorkspaceBaselineStepStatus;
+  durationMs: number | null;
+  output: string | null;
+};
+
 export type WorkspaceBaseline = {
   status: WorkspaceRepositoryStatus;
   updatedAt: string | null;
   commands: number;
   message: string | null;
+  steps: WorkspaceBaselineStep[];
 };
 
 export type WorkspaceRepository = RepositoryInspection & {
@@ -56,7 +67,8 @@ export function workspaceRepositoryFromInspection(
       status: "unknown",
       updatedAt: null,
       commands: 0,
-      message: null
+      message: null,
+      steps: []
     },
     dependencyVersions
   };
@@ -258,9 +270,16 @@ function normalizeWorkspaceRepository(input: unknown): unknown {
     ...candidate,
     package: normalizePackageInspection(candidate.package),
     baseline: isWorkspaceBaseline(candidate.baseline)
-      ? candidate.baseline
+      ? normalizeWorkspaceBaseline(candidate.baseline)
       : legacyBaseline(candidate.baselineStatus),
     dependencyVersions: candidate.dependencyVersions ?? {}
+  };
+}
+
+function normalizeWorkspaceBaseline(baseline: WorkspaceBaseline): WorkspaceBaseline {
+  return {
+    ...baseline,
+    steps: baseline.steps ?? []
   };
 }
 
@@ -367,7 +386,8 @@ function legacyBaseline(
             : "unknown",
     updatedAt: null,
     commands: 0,
-    message: null
+    message: null,
+    steps: []
   };
 }
 
@@ -402,10 +422,38 @@ function isWorkspaceBaseline(input: unknown): input is WorkspaceBaseline {
     isWorkspaceRepositoryStatus(candidate.status) &&
     (candidate.updatedAt === null || typeof candidate.updatedAt === "string") &&
     typeof candidate.commands === "number" &&
-    (candidate.message === null || typeof candidate.message === "string")
+    (candidate.message === null || typeof candidate.message === "string") &&
+    (candidate.steps === undefined ||
+      (Array.isArray(candidate.steps) && candidate.steps.every(isWorkspaceBaselineStep)))
   );
 }
 
 function isDependencyVersionRecord(input: unknown): input is Record<string, DependencyVersionInfo> {
   return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function isWorkspaceBaselineStep(input: unknown): input is WorkspaceBaselineStep {
+  if (typeof input !== "object" || input === null) {
+    return false;
+  }
+
+  const candidate = input as WorkspaceBaselineStep;
+
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.command === "string" &&
+    isWorkspaceBaselineStepStatus(candidate.status) &&
+    (candidate.durationMs === null || typeof candidate.durationMs === "number") &&
+    (candidate.output === null || typeof candidate.output === "string")
+  );
+}
+
+function isWorkspaceBaselineStepStatus(input: unknown): input is WorkspaceBaselineStepStatus {
+  return (
+    input === "pending" ||
+    input === "running" ||
+    input === "passed" ||
+    input === "failed" ||
+    input === "skipped"
+  );
 }

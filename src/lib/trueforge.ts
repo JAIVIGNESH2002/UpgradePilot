@@ -89,6 +89,19 @@ type TurnEventsResponse = {
   };
 };
 
+type NpmBaselineSandboxRunResponse = {
+  data: {
+    sandbox_id: string;
+    command: string;
+    exit_code: number;
+    output: string;
+    cleanup: {
+      status: "deleted" | "failed";
+      error?: string;
+    };
+  };
+};
+
 type TrueForgeBaselineWorkflowResult = {
   overallStatus: BaselineStatus;
   runtime?: {
@@ -241,6 +254,45 @@ export class TrueForgeClient {
     const completedTurn = await this.waitForTurn(session.data.id, turn.data.id);
     const workflowText = await this.extractTurnWorkflowText(session.data.id, completedTurn);
     const workflowResult = parseBaselineWorkflowResult(workflowText);
+
+    return mapBaselineWorkflowResult(workflowResult, input.scripts);
+  }
+
+  async runNpmBaselineSandbox(input: {
+    repositoryUrl: string;
+    scripts: Record<string, string>;
+    packageManager: VerificationPackageManager;
+  }): Promise<BaselineVerificationResult> {
+    const health = await this.getHealth();
+    const sandboxProvider = await this.getSandboxProviderStatus();
+
+    if (!sandboxProvider || sandboxProvider.status !== "ready") {
+      throw new TrueForgeIntegrationError(
+        sandboxProvider
+          ? `TrueForge ${health.version} sandbox provider ${sandboxProvider.type} is ${sandboxProvider.status}: ${sandboxProvider.statusReason ?? "no reason provided"}.`
+          : `TrueForge ${health.version} is reachable, but no sandbox provider is configured.`
+      );
+    }
+
+    const run = await this.postJson<NpmBaselineSandboxRunResponse>(
+      "/api/v1/sandboxes/npm-baseline-runs",
+      {
+        repository_url: input.repositoryUrl,
+        package_manager: input.packageManager,
+        timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_BASELINE_TIMEOUT_SECONDS", 10 * 60)
+      }
+    );
+
+    if (run.data.cleanup.status === "failed") {
+      throw new TrueForgeIntegrationError(
+        `TrueForge baseline sandbox cleanup failed: ${run.data.cleanup.error ?? "unknown cleanup error"}.`
+      );
+    }
+
+    const workflowResult = parseBaselineWorkflowResult(run.data.output, {
+      command: run.data.command,
+      exitCode: run.data.exit_code
+    });
 
     return mapBaselineWorkflowResult(workflowResult, input.scripts);
   }
@@ -435,7 +487,7 @@ export class TrueForgeSandboxProvider implements SandboxProvider {
     scripts: Record<string, string>;
     packageManager: VerificationPackageManager;
   }): Promise<BaselineVerificationResult> {
-    return this.client.runNpmBaselineWorkflow(input);
+    return this.client.runNpmBaselineSandbox(input);
   }
 }
 
@@ -524,7 +576,10 @@ function mapBaselineWorkflowResult(
   };
 }
 
-export function parseBaselineWorkflowResult(text: string): TrueForgeBaselineWorkflowResult {
+export function parseBaselineWorkflowResult(
+  text: string,
+  context?: { command?: string; exitCode?: number }
+): TrueForgeBaselineWorkflowResult {
   const wrapperPayload = parseResultTextWrapper(text);
   const markerPattern = new RegExp(
     `${UPGRADEPILOT_BASELINE_RESULT_MARKER}_START\\s*([\\s\\S]*?)\\s*${UPGRADEPILOT_BASELINE_RESULT_MARKER}_END`
@@ -533,15 +588,15 @@ export function parseBaselineWorkflowResult(text: string): TrueForgeBaselineWork
   const rawPayload = wrapperPayload ?? (markerMatch ? markerMatch[1] : null);
 
   if (!rawPayload) {
-    throw new TrueForgeIntegrationError(
-      "TrueForge baseline workflow output did not contain the UpgradePilot result markers."
-    );
+    throw new TrueForgeIntegrationError(describeMissingBaselineMarkers(text, context));
   }
 
   const parsed = JSON.parse(rawPayload) as Partial<TrueForgeBaselineWorkflowResult>;
 
   if (
-    (parsed.overallStatus !== "PASSED" && parsed.overallStatus !== "FAILED") ||
+    (parsed.overallStatus !== "PASSED" &&
+      parsed.overallStatus !== "FAILED" &&
+      parsed.overallStatus !== "BLOCKED") ||
     !Array.isArray(parsed.commands)
   ) {
     throw new TrueForgeIntegrationError(
@@ -550,6 +605,31 @@ export function parseBaselineWorkflowResult(text: string): TrueForgeBaselineWork
   }
 
   return parsed as TrueForgeBaselineWorkflowResult;
+}
+
+function describeMissingBaselineMarkers(
+  text: string,
+  context?: { command?: string; exitCode?: number }
+): string {
+  const details = [
+    "TrueForge baseline workflow output did not contain the UpgradePilot result markers."
+  ];
+
+  if (context?.command) {
+    details.push(`Command: ${context.command}.`);
+  }
+
+  if (context?.exitCode !== undefined) {
+    details.push(`Exit code: ${context.exitCode}.`);
+  }
+
+  const output = truncateCommandOutput(text.trim());
+
+  if (output) {
+    details.push(`Output: ${output}`);
+  }
+
+  return details.join(" ");
 }
 
 function parseResultTextWrapper(text: string): string | null {

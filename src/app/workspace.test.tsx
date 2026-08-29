@@ -6,6 +6,7 @@ import type { RepositoryInspection } from "@/lib/package-inspection";
 import {
   REPOSITORY_WORKSPACE_STORAGE_KEY,
   serializeRepositoryWorkspaceSnapshot,
+  type WorkspaceBaselineStep,
   workspaceRepositoryFromInspection
 } from "@/lib/repository-workspace";
 
@@ -205,7 +206,8 @@ describe("RepositoryWorkspace", () => {
           status: "healthy",
           updatedAt: "2026-08-28T10:00:00Z",
           commands: 2,
-          message: null
+          message: null,
+          steps: makeBaselineSteps()
         }
       })
     );
@@ -216,6 +218,9 @@ describe("RepositoryWorkspace", () => {
 
     expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
     expect(screen.getByRole("button", { name: "Re-run baseline" })).toBeEnabled();
+    expect(screen.getByText("Install dependencies")).toBeVisible();
+    expect(screen.getByText("npm run test")).toBeVisible();
+    expect(screen.getAllByText("Passed")).toHaveLength(2);
   });
 
   it("automatically establishes baseline when preparing Verify Upgrade", async () => {
@@ -236,7 +241,8 @@ describe("RepositoryWorkspace", () => {
           status: "healthy",
           updatedAt: "2026-08-28T10:00:00Z",
           commands: 2,
-          message: null
+          message: null,
+          steps: makeBaselineSteps()
         }
       })
     );
@@ -254,6 +260,36 @@ describe("RepositoryWorkspace", () => {
         body: JSON.stringify({ repositoryUrl: "https://github.com/acme/widgets" })
       })
     );
+  });
+
+  it("persists expanded baseline command evidence across reloads", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+
+    render(<RepositoryWorkspace />);
+
+    expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Baseline details: Healthy" }));
+
+    expect(screen.getByText("Install dependencies")).toBeVisible();
+    expect(screen.getByText("npm ci")).toBeVisible();
+    expect(screen.getByText("npm run test")).toBeVisible();
   });
 
   it("refreshes stale persisted repository inspection and latest-version data", async () => {
@@ -417,4 +453,23 @@ function makeDependencyVersions() {
       reason: null
     }
   } as const;
+}
+
+function makeBaselineSteps(): WorkspaceBaselineStep[] {
+  return [
+    {
+      name: "Install dependencies",
+      command: "npm ci",
+      status: "passed",
+      durationMs: 1200,
+      output: "installed"
+    },
+    {
+      name: "Test",
+      command: "npm run test",
+      status: "passed",
+      durationMs: 900,
+      output: "2 passed"
+    }
+  ];
 }
