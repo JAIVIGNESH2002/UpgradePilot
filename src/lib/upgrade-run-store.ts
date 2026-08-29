@@ -314,8 +314,7 @@ async function completeUpgradeRun({
           : "repair_failed";
     record.message = upgradeRunMessage(finalResult, repairHandoff);
     record.steps = completedUpgradeSteps(record.steps, result, repairHandoff, cleanupOutput);
-    record.changedFiles =
-      finalResult.status === "VERIFIED" ? (finalResult.changedFiles ?? []) : [];
+    record.changedFiles = finalResult.status === "VERIFIED" ? (finalResult.changedFiles ?? []) : [];
   } catch (error) {
     record.status = "completed";
     record.outcome = "interrupted";

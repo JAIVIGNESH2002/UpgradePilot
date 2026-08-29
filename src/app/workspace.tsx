@@ -9,9 +9,11 @@ import {
   GitBranch,
   Loader2,
   MinusCircle,
+  Moon,
   Package,
   Plus,
   Search,
+  Sun,
   Trash2,
   XCircle,
   GitPullRequest
@@ -56,6 +58,7 @@ type PullRequestState =
   | { status: "idle" }
   | { status: "creating"; runId: string }
   | { status: "error"; runId: string; message: string };
+type ThemePreference = "light" | "dark";
 type RepositoryRefreshState =
   | { status: "idle" }
   | { status: "loading"; repositoryId: string }
@@ -81,6 +84,20 @@ const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "dev", label: "Dev" }
 ];
 
+function initialThemePreference(): ThemePreference {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+
+  const storedTheme = window.localStorage.getItem("upgradepilot-theme");
+
+  if (storedTheme === "dark" || storedTheme === "light") {
+    return storedTheme;
+  }
+
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 export function RepositoryWorkspace() {
   const [repositories, setRepositories] = useState<WorkspaceRepository[]>([]);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
@@ -97,11 +114,17 @@ export function RepositoryWorkspace() {
   });
   const [activeUpgradeRun, setActiveUpgradeRun] = useState<UpgradeRunSnapshot | null>(null);
   const [pullRequestState, setPullRequestState] = useState<PullRequestState>({ status: "idle" });
+  const [theme, setTheme] = useState<ThemePreference>(() => initialThemePreference());
   const [verifiedUpgradeKeys, setVerifiedUpgradeKeys] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DependencyFilter>("all");
   const [hasLoadedWorkspace, setHasLoadedWorkspace] = useState(false);
   const refreshAttemptedRepositoryIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    window.localStorage.setItem("upgradepilot-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -581,7 +604,7 @@ export function RepositoryWorkspace() {
         />
 
         <section className="min-w-0">
-          <TopHeader />
+          <TopHeader theme={theme} onThemeChange={setTheme} />
           {hasLoadedWorkspace && activeUpgradeRun !== null && selectedRepository !== null ? (
             <UpgradeRunDetail
               repository={selectedRepository}
@@ -614,20 +637,39 @@ export function RepositoryWorkspace() {
   );
 }
 
-function TopHeader() {
+function TopHeader({
+  theme,
+  onThemeChange
+}: {
+  theme: ThemePreference;
+  onThemeChange: (theme: ThemePreference) => void;
+}) {
   return (
-    <header className="flex h-14 items-center justify-between border-b border-border px-4 sm:px-6">
+    <header className="flex h-14 items-center justify-between border-b border-border bg-background/95 px-4 shadow-sm sm:px-6">
       <div className="flex min-w-0 items-center gap-3">
-        <div className="flex size-7 items-center justify-center rounded-md border border-border bg-secondary">
+        <div className="flex size-8 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary">
           <Package className="size-4" aria-hidden="true" />
         </div>
         <div className="min-w-0">
-          <h1 className="truncate text-sm font-semibold">UpgradePilot</h1>
-          <p className="hidden text-xs text-muted-foreground sm:block">
+          <h1 className="truncate text-base font-semibold">UpgradePilot</h1>
+          <p className="hidden text-sm text-muted-foreground sm:block">
             Repository dependencies and verified upgrade preparation
           </p>
         </div>
       </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+        onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
+      >
+        {theme === "dark" ? (
+          <Sun className="size-4" aria-hidden="true" />
+        ) : (
+          <Moon className="size-4" aria-hidden="true" />
+        )}
+      </Button>
     </header>
   );
 }
@@ -654,12 +696,10 @@ function RepositorySidebar({
   onSelectRepository: (repositoryId: string) => void;
 }) {
   return (
-    <aside className="border-b border-border bg-secondary/35 lg:min-h-screen lg:border-b-0 lg:border-r">
+    <aside className="border-b border-border bg-secondary/45 lg:min-h-screen lg:border-b-0 lg:border-r">
       <div className="flex h-full flex-col">
         <div className="border-b border-border px-4 py-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Repositories
-          </p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Repositories</p>
           <form className="mt-3 space-y-2" onSubmit={onAddRepository}>
             <label className="sr-only" htmlFor="repositoryUrl">
               Public GitHub repository URL
@@ -671,7 +711,7 @@ function RepositorySidebar({
               value={repositoryUrl}
               onChange={(event) => onRepositoryUrlChange(event.target.value)}
               placeholder="https://github.com/owner/repo"
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-base outline-none transition-colors placeholder:text-muted-foreground hover:border-primary/35 focus-visible:ring-[3px] focus-visible:ring-ring/50"
             />
             <Button
               className="w-full justify-start"
@@ -688,7 +728,7 @@ function RepositorySidebar({
             </Button>
           </form>
           {addState.status === "error" ? (
-            <div className="mt-3 rounded-md border border-destructive/30 bg-background p-3">
+            <div className="mt-3 rounded-md border border-destructive/35 bg-destructive/5 p-3">
               <p className="text-sm font-medium text-destructive">Repository inspection failed</p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">{addState.message}</p>
             </div>
@@ -736,8 +776,8 @@ function RepositorySidebarItem({
   return (
     <div
       className={cn(
-        "group grid grid-cols-[minmax(0,1fr)_28px] items-center gap-1 rounded-md border border-transparent",
-        isSelected ? "border-border bg-background shadow-sm" : "hover:bg-background/70"
+        "group grid grid-cols-[minmax(0,1fr)_28px] items-center gap-1 rounded-md border border-transparent transition-all duration-150 hover:-translate-y-0.5 hover:border-primary/20 hover:bg-background hover:shadow-sm",
+        isSelected ? "border-primary/35 bg-background shadow-sm ring-1 ring-primary/10" : ""
       )}
     >
       <button
@@ -748,15 +788,15 @@ function RepositorySidebarItem({
       >
         <span className="flex items-center gap-2">
           <HealthDot status={repository.baseline.status} />
-          <span className="truncate text-sm font-medium">{repository.metadata.name}</span>
+          <span className="truncate text-[15px] font-semibold">{repository.metadata.name}</span>
         </span>
-        <span className="mt-0.5 block truncate pl-4 text-xs text-muted-foreground">
+        <span className="mt-0.5 block truncate pl-4 text-sm text-muted-foreground">
           {repository.metadata.owner}
         </span>
       </button>
       <button
         type="button"
-        className="mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground opacity-100 transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100"
+        className="mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground opacity-100 transition-all hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100"
         aria-label={`Remove ${repository.metadata.owner}/${repository.metadata.name}`}
         onClick={() => onRemoveRepository(repository.id)}
       >
@@ -801,19 +841,17 @@ function UpgradeRunDetail({
             <ArrowLeft className="size-4" aria-hidden="true" />
             Back to repository
           </Button>
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Upgrade run
-          </p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Upgrade run</p>
           <h2 className="mt-1 truncate text-2xl font-semibold tracking-normal">
             {run.packageName}
           </h2>
-          <p className="mt-2 text-sm text-muted-foreground">
+          <p className="mt-2 text-base text-muted-foreground">
             {repository.metadata.owner}/{repository.metadata.name} - {run.currentVersion} to{" "}
             {run.targetVersion}
           </p>
         </div>
         <div className="flex flex-col items-start gap-2 sm:items-end">
-          <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-sm">
+          <div className="flex items-center gap-2 rounded-md border border-primary/20 bg-primary/10 px-3 py-2 text-sm text-primary">
             <UpgradeRunStatusIcon run={run} />
             <span className="font-medium">{upgradeRunStatusLabel(run)}</span>
           </div>
@@ -845,12 +883,12 @@ function UpgradeRunDetail({
         </div>
       </div>
 
-      <section className="overflow-hidden rounded-md border border-border bg-background">
+      <section className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
         <div className="border-b border-border px-4 py-3">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 className="text-sm font-semibold">Workflow</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{run.message}</p>
+              <h3 className="text-base font-semibold">Workflow</h3>
+              <p className="mt-1 text-base text-muted-foreground">{run.message}</p>
             </div>
             <span className="text-xs text-muted-foreground">
               Started {formatRepositoryUpdatedAt(run.startedAt)}
@@ -860,7 +898,7 @@ function UpgradeRunDetail({
         <div className="h-1 bg-secondary">
           <div
             className={cn(
-              "h-full bg-foreground transition-[width] duration-700 ease-out",
+              "h-full bg-primary transition-[width] duration-700 ease-out",
               isRunning ? "motion-safe:animate-pulse" : ""
             )}
             style={{ width: `${progressValue}%` }}
@@ -868,7 +906,10 @@ function UpgradeRunDetail({
         </div>
         <ol className="divide-y divide-border">
           {run.steps.map((step, index) => (
-            <li key={`${step.name}:${index}`} className="px-4 py-4">
+            <li
+              key={`${step.name}:${index}`}
+              className="px-4 py-4 transition-colors hover:bg-secondary/35"
+            >
               <UpgradeRunStepRow step={step} />
             </li>
           ))}
@@ -884,11 +925,11 @@ function UpgradeRunStepRow({ step }: { step: UpgradeRunStep }) {
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <BaselineStepIcon status={step.status} />
-          <p className="truncate text-sm font-medium">{step.name}</p>
+          <p className="truncate text-base font-semibold">{step.name}</p>
           <BaselineStepStatus status={step.status} />
         </div>
         {step.command ? (
-          <p className="mt-1 truncate pl-6 font-mono text-xs text-muted-foreground">
+          <p className="mt-1 truncate pl-6 font-mono text-sm text-muted-foreground">
             {step.command}
           </p>
         ) : null}
@@ -897,14 +938,14 @@ function UpgradeRunStepRow({ step }: { step: UpgradeRunStep }) {
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
               View output
             </summary>
-            <pre className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-secondary/30 p-3 text-xs leading-5 text-muted-foreground">
+            <pre className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-secondary/40 p-3 text-sm leading-6 text-foreground">
               {step.output}
             </pre>
           </details>
         ) : null}
       </div>
       {step.durationMs !== null ? (
-        <span className="pl-6 text-xs text-muted-foreground sm:pl-0">
+        <span className="pl-6 text-sm text-muted-foreground sm:pl-0">
           {formatDuration(step.durationMs)}
         </span>
       ) : null}
@@ -914,18 +955,18 @@ function UpgradeRunStepRow({ step }: { step: UpgradeRunStep }) {
 
 function UpgradeRunStatusIcon({ run }: { run: UpgradeRunSnapshot }) {
   if (run.status === "running") {
-    return <Loader2 className="size-4 animate-spin" aria-hidden="true" />;
+    return <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />;
   }
 
   if (run.outcome === "verified") {
-    return <CheckCircle2 className="size-4 text-green-600" aria-hidden="true" />;
+    return <CheckCircle2 className="size-4 text-success" aria-hidden="true" />;
   }
 
   if (run.outcome === "blocked" || run.outcome === "interrupted") {
-    return <XCircle className="size-4 text-red-600" aria-hidden="true" />;
+    return <XCircle className="size-4 text-destructive" aria-hidden="true" />;
   }
 
-  return <MinusCircle className="size-4 text-amber-600" aria-hidden="true" />;
+  return <MinusCircle className="size-4 text-warning" aria-hidden="true" />;
 }
 
 function RepositoryDetail({
@@ -1006,7 +1047,7 @@ function RepositoryHeader({ repository }: { repository: WorkspaceRepository }) {
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
             <a
-              className="inline-flex items-center gap-1.5 rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="inline-flex items-center gap-1.5 rounded-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
               href={repository.metadata.url}
               target="_blank"
               rel="noreferrer"
@@ -1025,12 +1066,12 @@ function RepositoryHeader({ repository }: { repository: WorkspaceRepository }) {
             <h2 className="truncate text-2xl font-semibold tracking-normal">
               {repository.metadata.name}
             </h2>
-            <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
+            <p className="mt-1 max-w-3xl text-base leading-7 text-muted-foreground">
               {repository.metadata.description ?? "No repository description provided."}
             </p>
           </div>
         </div>
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-5 lg:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-base sm:grid-cols-5 lg:grid-cols-3">
           <MetadataItem label="Package" value={repository.package.packageName ?? "Unnamed"} />
           <MetadataItem label="Node" value={repository.package.nodeRequirement ?? "Not declared"} />
           <MetadataItem label="Lockfile" value={lockfileLabel(repository)} />
@@ -1057,8 +1098,10 @@ function MetadataItem({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className="mt-1 flex min-w-0 items-center gap-2 font-medium">
+      <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-1 flex min-w-0 items-center gap-2 font-semibold">
         {status ? <HealthDot status={status} /> : null}
         <span className="truncate">{value}</span>
       </dd>
@@ -1101,12 +1144,12 @@ function BaselinePanel({
   }, [isRunning]);
 
   return (
-    <section className="overflow-hidden rounded-md border border-border bg-background">
+    <section className="overflow-hidden rounded-md border border-border bg-background shadow-sm">
       <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <button
             type="button"
-            className="flex min-w-0 items-center gap-2 rounded-sm text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="flex min-w-0 items-center gap-2 rounded-sm text-left text-base font-semibold transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
             aria-label={`Baseline details: ${isRunning ? "Running" : statusLabel(repository.baseline.status)}`}
             aria-expanded={isExpanded}
             aria-controls={`baseline-steps-${repository.id}`}
@@ -1122,7 +1165,7 @@ function BaselinePanel({
             <HealthDot status={isRunning ? "unknown" : repository.baseline.status} />
             <span>Baseline: {isRunning ? "Running" : statusLabel(repository.baseline.status)}</span>
           </button>
-          <p className="mt-1 text-sm text-muted-foreground">{baselineDescription(repository)}</p>
+          <p className="mt-1 text-base text-muted-foreground">{baselineDescription(repository)}</p>
           {baselineActionState.status === "error" &&
           baselineActionState.repositoryId === repository.id ? (
             <p className="mt-2 text-sm text-destructive">{baselineActionState.message}</p>
@@ -1159,7 +1202,7 @@ function BaselinePanel({
           <div className="h-1 bg-secondary">
             <div
               className={cn(
-                "h-full bg-foreground transition-[width] duration-700 ease-out",
+                "h-full bg-primary transition-[width] duration-700 ease-out",
                 isRunning ? "motion-safe:animate-pulse" : ""
               )}
               style={{ width: `${progressValue}%` }}
@@ -1167,7 +1210,10 @@ function BaselinePanel({
           </div>
           <ol className="divide-y divide-border">
             {steps.map((step) => (
-              <li key={`${step.name}:${step.command}`} className="px-4 py-3">
+              <li
+                key={`${step.name}:${step.command}`}
+                className="px-4 py-3 transition-colors hover:bg-secondary/40"
+              >
                 <BaselineStepRow step={step} />
               </li>
             ))}
@@ -1210,15 +1256,15 @@ function BaselineStepRow({ step }: { step: WorkspaceRepository["baseline"]["step
 
 function BaselineStepIcon({ status }: { status: WorkspaceBaselineStep["status"] }) {
   if (status === "running") {
-    return <Loader2 className="size-4 shrink-0 animate-spin text-foreground" aria-hidden="true" />;
+    return <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden="true" />;
   }
 
   if (status === "passed") {
-    return <CheckCircle2 className="size-4 shrink-0 text-green-600" aria-hidden="true" />;
+    return <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden="true" />;
   }
 
   if (status === "failed") {
-    return <XCircle className="size-4 shrink-0 text-red-600" aria-hidden="true" />;
+    return <XCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />;
   }
 
   if (status === "skipped") {
@@ -1240,7 +1286,7 @@ function BaselineStepStatus({ status }: { status: WorkspaceBaselineStep["status"
             ? "Skipped"
             : "Queued";
 
-  return <span className="text-xs text-muted-foreground">{label}</span>;
+  return <span className="text-xs font-medium text-muted-foreground">{label}</span>;
 }
 
 function DependencySurface({
@@ -1287,8 +1333,8 @@ function DependencySurface({
     <section className="space-y-3">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Dependencies</h2>
-          <p className="text-sm text-muted-foreground">
+          <h2 className="text-xl font-semibold">Dependencies</h2>
+          <p className="text-base text-muted-foreground">
             {dependencies.length} packages from root package.json
           </p>
         </div>
@@ -1313,7 +1359,7 @@ function DependencySurface({
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
               placeholder="Search packages"
-              className="h-9 w-full rounded-md border border-input bg-background pl-8 pr-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:w-56"
+              className="h-9 w-full rounded-md border border-input bg-background pl-8 pr-3 text-base outline-none placeholder:text-muted-foreground transition-colors hover:border-primary/35 focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:w-56"
             />
           </label>
           <div className="inline-flex h-9 rounded-md border border-border bg-secondary/60 p-0.5">
@@ -1322,7 +1368,7 @@ function DependencySurface({
                 key={dependencyFilter.value}
                 type="button"
                 className={cn(
-                  "rounded-sm px-3 text-sm font-medium text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+                  "rounded-sm px-3 text-sm font-semibold text-muted-foreground transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
                   filter === dependencyFilter.value
                     ? "bg-background text-foreground shadow-sm"
                     : "hover:text-foreground"
@@ -1340,8 +1386,8 @@ function DependencySurface({
 
       <div className="overflow-hidden rounded-md border border-border">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[800px] border-collapse text-sm">
-            <thead className="bg-secondary/80 text-left text-xs uppercase tracking-wide text-muted-foreground">
+          <table className="w-full min-w-[800px] border-collapse text-base">
+            <thead className="bg-secondary text-left text-xs uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-4 py-3 font-medium">Package</th>
                 <th className="px-4 py-3 font-medium">Current</th>
@@ -1405,13 +1451,13 @@ function DependencyRow({
       dependency.changeType === "major");
 
   return (
-    <tr className="border-t border-border hover:bg-secondary/35">
+    <tr className="border-t border-border transition-colors hover:bg-accent/45">
       <td className="px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <Package className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <div className="min-w-0">
-            <p className="truncate font-medium">{dependency.packageName}</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="truncate font-semibold">{dependency.packageName}</p>
+            <p className="text-sm text-muted-foreground">
               {dependency.kind === "dependency" ? "dependency" : "devDependency"}
             </p>
           </div>
@@ -1419,11 +1465,11 @@ function DependencyRow({
       </td>
       <td className="px-4 py-3">
         <SemverIndicator label="Current" tone="current" />
-        <span className="ml-2 font-mono text-xs">
+        <span className="ml-2 font-mono text-sm font-medium">
           {dependency.currentComparableVersion ?? dependency.currentVersion}
         </span>
       </td>
-      <td className="px-4 py-3 text-muted-foreground">
+      <td className="px-4 py-3 font-mono text-sm font-medium text-foreground">
         {dependency.latestVersion ?? "Unavailable"}
       </td>
       <td className="px-4 py-3">
@@ -1432,12 +1478,12 @@ function DependencyRow({
           tone={dependency.changeType}
         />
         {dependency.reason ? (
-          <span className="ml-2 text-xs text-muted-foreground">{dependency.reason}</span>
+          <span className="ml-2 text-sm text-muted-foreground">{dependency.reason}</span>
         ) : null}
       </td>
       <td className="px-4 py-3">
         {isVerified ? (
-          <span className="inline-flex items-center gap-1.5 text-sm font-medium text-green-700">
+          <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-success">
             <CheckCircle2 className="size-4" aria-hidden="true" />
             Verified upgrade
           </span>
@@ -1451,9 +1497,9 @@ function DependencyRow({
             Verify upgrade
           </Button>
         ) : dependency.changeType === "current" ? (
-          <span className="text-sm text-muted-foreground">Current</span>
+          <span className="text-sm font-medium text-muted-foreground">Current</span>
         ) : (
-          <span className="text-sm text-muted-foreground">Unavailable</span>
+          <span className="text-sm font-medium text-muted-foreground">Unavailable</span>
         )}
       </td>
     </tr>
@@ -1469,19 +1515,19 @@ function SemverIndicator({
 }) {
   const toneClassName =
     tone === "major"
-      ? "border-red-200 bg-red-50 text-red-700"
+      ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/15 dark:text-red-200"
       : tone === "minor"
-        ? "border-amber-200 bg-amber-50 text-amber-700"
+        ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-100"
         : tone === "patch"
-          ? "border-green-200 bg-green-50 text-green-700"
+          ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/30 dark:bg-green-500/15 dark:text-green-100"
           : tone === "current"
-            ? "border-border bg-secondary text-foreground"
+            ? "border-primary/20 bg-primary/10 text-primary"
             : "border-border bg-background text-muted-foreground";
 
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-sm border px-2 text-xs font-medium",
+        "inline-flex h-6 items-center rounded-sm border px-2 text-xs font-semibold",
         toneClassName
       )}
     >
@@ -1493,11 +1539,11 @@ function SemverIndicator({
 function HealthDot({ status }: { status: WorkspaceRepository["baseline"]["status"] }) {
   const className =
     status === "healthy"
-      ? "bg-green-600"
+      ? "bg-success shadow-[0_0_0_3px_color-mix(in_oklch,var(--success)_18%,transparent)]"
       : status === "failed"
-        ? "bg-red-600"
+        ? "bg-destructive shadow-[0_0_0_3px_color-mix(in_oklch,var(--destructive)_18%,transparent)]"
         : status === "interrupted"
-          ? "bg-amber-600"
+          ? "bg-warning shadow-[0_0_0_3px_color-mix(in_oklch,var(--warning)_18%,transparent)]"
           : "bg-muted-foreground";
 
   return (

@@ -599,8 +599,8 @@ export class TrueForgeClient {
         ...(input.textReplacements.length > 0
           ? { text_replacements: input.textReplacements }
           : input.fileReplacements.length > 0
-          ? { file_replacements: input.fileReplacements }
-          : { unified_diff: input.unifiedDiff }),
+            ? { file_replacements: input.fileReplacements }
+            : { unified_diff: input.unifiedDiff }),
         timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_REPAIR_VERIFY_TIMEOUT_SECONDS", 10 * 60)
       }
     );

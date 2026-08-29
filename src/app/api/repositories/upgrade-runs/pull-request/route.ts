@@ -38,7 +38,9 @@ export async function POST(request: Request) {
 
     const branchName = prBranchName(run.packageName, run.targetVersion);
     const title = `chore: upgrade ${run.packageName} to ${run.targetVersion}`;
-    const pullRequest = await new GitHubClient({ token: process.env.GITHUB_TOKEN }).createPullRequest({
+    const pullRequest = await new GitHubClient({
+      token: process.env.GITHUB_TOKEN
+    }).createPullRequest({
       repositoryUrl: run.repositoryUrl,
       branchName,
       title,
