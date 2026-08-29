@@ -381,8 +381,9 @@ describe("RepositoryWorkspace", () => {
           run: {
             ...makeUpgradeRun(),
             status: "completed",
-            outcome: "repair_simulated",
-            message: "Upgrade changed CI behavior. TrueForge repair agent handoff completed.",
+            outcome: "repair_failed",
+            message:
+              "Upgrade changed CI behavior and the repair cycle did not produce a verified result.",
             updatedAt: "2026-08-28T10:01:00Z",
             steps: makeUpgradeRun().steps.map((step, index) => ({
               ...step,
@@ -414,7 +415,7 @@ describe("RepositoryWorkspace", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
-    expect(screen.getByText("Repair handoff")).toBeVisible();
+    expect(screen.getByText("Repair failed")).toBeVisible();
 
     vi.useRealTimers();
   });
@@ -844,6 +845,11 @@ function makeUpgradeRun({ status = "running" }: { status?: "running" | "complete
     message: "Preparing deterministic upgrade verification.",
     startedAt: "2026-08-28T10:00:00Z",
     updatedAt: status === "completed" ? "2026-08-28T10:01:00Z" : null,
+    changedFiles:
+      status === "completed"
+        ? [{ path: "package.json", content: "{\"dependencies\":{\"react\":\"19.0.0\"}}\n" }]
+        : [],
+    pullRequest: null,
     steps: [
       {
         name: "Check baseline",
@@ -881,8 +887,8 @@ function makeUpgradeRun({ status = "running" }: { status?: "running" | "complete
         output: null
       },
       {
-        name: "Repair agent handoff",
-        command: "TrueForge repair agent handoff",
+        name: "Repair and re-verify",
+        command: "TrueForge repair agent + deterministic verification",
         status: "pending",
         durationMs: null,
         output: null

@@ -83,8 +83,10 @@ describe("upgrade-run-store", () => {
       status: "completed" as const,
       summary: "Repair agent identified an API compatibility issue.",
       sessionId: "session-1",
-      turnId: "turn-1"
+      turnId: "turn-1",
+      verificationResult: successfulUpgrade()
     }));
+    const cleanupUpgradeSandbox = vi.fn(async () => undefined);
     const run = startUpgradeRun(
       {
         repositoryUrl: "https://github.com/acme/widgets",
@@ -106,9 +108,12 @@ describe("upgrade-run-store", () => {
           ],
           skippedScripts: [],
           modelRepairRequired: true,
-          runtimeChangeRequired: false
+          runtimeChangeRequired: false,
+          sandboxId: "default.sandbox-1",
+          cleanup: { status: "retained" as const }
         })),
-        runRepairHandoff
+        runRepairHandoff,
+        cleanupUpgradeSandbox
       }
     );
     await vi.waitFor(() => expect(getUpgradeRun(run.id)?.status).toBe("completed"));
@@ -122,10 +127,130 @@ describe("upgrade-run-store", () => {
         targetVersion: "19.0.0"
       })
     );
-    expect(completedRun?.outcome).toBe("repair_simulated");
-    expect(completedRun?.message).toContain("repair agent handoff completed");
+    expect(cleanupUpgradeSandbox).toHaveBeenCalledWith({ sandboxId: "default.sandbox-1" });
+    expect(completedRun?.outcome).toBe("verified");
+    expect(completedRun?.message).toContain("verified after repair");
     expect(completedRun?.steps.at(-1)?.status).toBe("passed");
     expect(completedRun?.steps.at(-1)?.output).toContain("API compatibility");
+    expect(completedRun?.steps.at(-1)?.output).toContain("Repair was applied");
+    expect(completedRun?.steps.at(-1)?.output).toContain("was deleted after the repair handoff");
+  });
+
+  it("reports a repair failure when re-verification still fails", async () => {
+    const cleanupUpgradeSandbox = vi.fn(async () => undefined);
+    const run = startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "zod",
+        currentVersion: "3.25.0",
+        targetVersion: "4.4.3",
+        changeType: "major",
+        baseline: healthyBaseline,
+        packageManager: "npm"
+      },
+      {
+        runVerification: vi.fn(async () => repairableFailure()),
+        runRepairHandoff: vi.fn(async () => ({
+          status: "completed" as const,
+          summary: "Repair patch was applied.",
+          sessionId: "session-1",
+          turnId: "turn-1",
+          verificationResult: {
+            ...repairableFailure(),
+            cleanup: { status: "retained" as const },
+            commands: [
+              command(
+                "git apply --whitespace=nowarn /opt/tf/tool-results/upgradepilot-repair.patch",
+                0
+              ),
+              command("npm ci", 0),
+              command("npm run typecheck", 1, "still failed")
+            ],
+            modelRepairRequired: false
+          }
+        })),
+        cleanupUpgradeSandbox
+      }
+    );
+
+    await vi.waitFor(() => expect(getUpgradeRun(run.id)?.status).toBe("completed"));
+    const completedRun = getUpgradeRun(run.id);
+
+    expect(completedRun?.outcome).toBe("repair_failed");
+    expect(completedRun?.steps.at(-1)?.status).toBe("failed");
+    expect(completedRun?.steps.at(-1)?.output).toContain("npm run typecheck");
+    expect(cleanupUpgradeSandbox).toHaveBeenCalledWith({ sandboxId: "default.sandbox-1" });
+  });
+
+  it("attempts one additional repair when repaired verification is still source-repairable", async () => {
+    const cleanupUpgradeSandbox = vi.fn(async () => undefined);
+    const runRepairHandoff = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "completed" as const,
+        summary: "First repair updated deprecated schema options.",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        verificationResult: {
+          ...repairableFailure(),
+          commands: [
+            command("apply structured repair file replacements", 0),
+            command("npm ci", 0),
+            command(
+              "npm run typecheck",
+              1,
+              "Property 'errors' does not exist on type 'ZodError<unknown>'."
+            )
+          ],
+          modelRepairRequired: true,
+          sandboxId: "default.sandbox-1",
+          cleanup: { status: "retained" as const }
+        }
+      })
+      .mockResolvedValueOnce({
+        status: "completed" as const,
+        summary: "Second repair changed error.errors to error.issues.",
+        sessionId: "session-2",
+        turnId: "turn-2",
+        verificationResult: successfulUpgrade()
+      });
+    const run = startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "zod",
+        currentVersion: "3.25.0",
+        targetVersion: "4.4.3",
+        changeType: "major",
+        baseline: healthyBaseline,
+        packageManager: "npm"
+      },
+      {
+        runVerification: vi.fn(async () => repairableFailure()),
+        runRepairHandoff,
+        cleanupUpgradeSandbox
+      }
+    );
+
+    await vi.waitFor(() => expect(getUpgradeRun(run.id)?.status).toBe("completed"));
+    const completedRun = getUpgradeRun(run.id);
+
+    expect(runRepairHandoff).toHaveBeenCalledTimes(2);
+    expect(runRepairHandoff).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        verificationResult: expect.objectContaining({
+          commands: expect.arrayContaining([
+            expect.objectContaining({
+              command: "npm run typecheck",
+              output: expect.stringContaining("Property 'errors'")
+            })
+          ])
+        })
+      })
+    );
+    expect(completedRun?.outcome).toBe("verified");
+    expect(completedRun?.steps.at(-1)?.output).toContain("Attempt 2");
+    expect(cleanupUpgradeSandbox).toHaveBeenCalledWith({ sandboxId: "default.sandbox-1" });
   });
 
   it("blocks runtime/install incompatibility without model repair", async () => {
@@ -149,7 +274,9 @@ describe("upgrade-run-store", () => {
           ],
           skippedScripts: [],
           modelRepairRequired: false,
-          runtimeChangeRequired: true
+          runtimeChangeRequired: true,
+          sandboxId: "default.sandbox-1",
+          cleanup: { status: "deleted" as const }
         })),
         runRepairHandoff
       }
@@ -198,7 +325,26 @@ function successfulUpgrade() {
     ],
     skippedScripts: ["lint"],
     modelRepairRequired: false,
-    runtimeChangeRequired: false
+    runtimeChangeRequired: false,
+    sandboxId: "default.sandbox-1",
+    cleanup: { status: "deleted" as const }
+  };
+}
+
+function repairableFailure() {
+  return {
+    status: "FAILED" as const,
+    commands: [
+      command("git clone --depth 1 https://github.com/acme/widgets repo", 0),
+      command("npm install zod@4.4.3", 0),
+      command("npm ci", 0),
+      command("npm run typecheck", 1, "zod v4 type error")
+    ],
+    skippedScripts: [],
+    modelRepairRequired: true,
+    runtimeChangeRequired: false,
+    sandboxId: "default.sandbox-1",
+    cleanup: { status: "retained" as const }
   };
 }
 

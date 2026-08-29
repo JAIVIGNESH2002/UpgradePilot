@@ -133,7 +133,7 @@ describe("TrueForgeClient", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("creates a constrained repair handoff turn without sandbox execution", async () => {
+  it("creates a constrained repair turn, applies the patch, and verifies again", async () => {
     vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -141,6 +141,17 @@ describe("TrueForgeClient", () => {
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ method, url: href, body });
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-context")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-repair-context.sh",
+            exit_code: 0,
+            context: "--- src/lib/validation.ts\nz.string({ required_error: 'Required' })"
+          }
+        });
+      }
 
       if (href.endsWith("/api/v1/models")) {
         return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
@@ -169,11 +180,51 @@ describe("TrueForgeClient", () => {
                 content: JSON.stringify({
                   summary: "The upgrade appears to require an API migration.",
                   likelyCause: "A removed API is still imported.",
-                  nextRepairAction: "Update imports and rerun the deterministic checks."
+                  textReplacements: [
+                    {
+                      path: "src/lib/validation.ts",
+                      old_text: "z.string({ required_error: 'Required' })",
+                      new_text: "z.string().min(1, 'Required')"
+                    }
+                  ],
+                  fileReplacements: [],
+                  unifiedDiff: ""
                 })
               },
               required_actions: []
             }
+          }
+        });
+      }
+
+      if (
+        href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-verifications")
+      ) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-repair-verify.sh",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_UPGRADE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "PASSED",
+                upgradeStatus: "VERIFIED",
+                upgrade: { modelRepairRequired: false, runtimeChangeRequired: false },
+                commands: [
+                  {
+                    command: "apply structured repair file replacements",
+                    exitCode: 0,
+                    durationMs: 1,
+                    output: "Applied 1 file replacement(s)."
+                  },
+                  { command: "npm ci", exitCode: 0, durationMs: 2, output: "installed" },
+                  { command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }
+                ]
+              }),
+              "UPGRADEPILOT_UPGRADE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "retained" }
           }
         });
       }
@@ -198,7 +249,9 @@ describe("TrueForgeClient", () => {
         ],
         skippedScripts: [],
         modelRepairRequired: true,
-        runtimeChangeRequired: false
+        runtimeChangeRequired: false,
+        sandboxId: "default.sandbox-1",
+        cleanup: { status: "retained" }
       }
     });
 
@@ -213,9 +266,31 @@ describe("TrueForgeClient", () => {
     expect(result).toMatchObject({
       status: "completed",
       sessionId: "session-1",
-      turnId: "turn-1"
+      turnId: "turn-1",
+      verificationResult: { status: "VERIFIED" }
     });
     expect(result.summary).toContain("API migration");
+    expect(
+      requests.find((request) =>
+        request.url.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-context")
+      )?.body
+    ).toMatchObject({ package_manager: "npm", package_name: "react" });
+    expect(
+      requests.find((request) =>
+        request.url.endsWith(
+          "/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-verifications"
+        )
+      )?.body
+    ).toMatchObject({
+      package_manager: "npm",
+      text_replacements: [
+        {
+          path: "src/lib/validation.ts",
+          old_text: expect.stringContaining("required_error"),
+          new_text: expect.stringContaining("z.string().min")
+        }
+      ]
+    });
     expect(sessionRequest?.body).toMatchObject({
       agent: {
         spec: {
@@ -239,6 +314,11 @@ describe("TrueForgeClient", () => {
       }
     });
     expect(JSON.stringify(turnRequest?.body)).toContain("Do not run commands or use tools.");
+    expect(JSON.stringify(turnRequest?.body)).toContain(
+      "Application source code changes are expected in this step"
+    );
+    expect(JSON.stringify(turnRequest?.body)).toContain("must not be treated as blocked");
+    expect(JSON.stringify(turnRequest?.body)).toContain("Prefer textReplacements");
   });
 
   it("includes recent TrueForge events when a repair handoff reaches the iteration limit", async () => {
@@ -246,6 +326,17 @@ describe("TrueForgeClient", () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
       const method = init?.method ?? "GET";
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-context")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-repair-context.sh",
+            exit_code: 0,
+            context: "--- src/lib/validation.ts\nzod failure context"
+          }
+        });
+      }
 
       if (href.endsWith("/api/v1/models")) {
         return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
@@ -322,7 +413,9 @@ describe("TrueForgeClient", () => {
         commands: [{ command: "npm run test", exitCode: 1, durationMs: 20, output: "failed" }],
         skippedScripts: [],
         modelRepairRequired: true,
-        runtimeChangeRequired: false
+        runtimeChangeRequired: false,
+        sandboxId: "default.sandbox-1",
+        cleanup: { status: "retained" }
       }
     });
 
@@ -605,7 +698,8 @@ describe("TrueForgeSandboxProvider", () => {
           repository_url: "https://github.com/acme/demo",
           package_manager: "npm",
           package_name: "react",
-          target_version: "19.0.0"
+          target_version: "19.0.0",
+          retain_failed_sandbox: true
         });
 
         return Response.json({
@@ -666,7 +760,102 @@ describe("TrueForgeSandboxProvider", () => {
     expect(result.status).toBe("VERIFIED");
     expect(result.modelRepairRequired).toBe(false);
     expect(result.runtimeChangeRequired).toBe(false);
+    expect(result.sandboxId).toBe("default.sandbox-1");
+    expect(result.cleanup).toEqual({ status: "deleted" });
     expect(result.commands.map((command) => command.command)).toContain("npm install react@19.0.0");
+  });
+
+  it("maps retained repairable upgrade sandboxes and can clean them up", async () => {
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      requests.push({ method, url: href, body });
+
+      if (href.endsWith("/healthz")) {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      if (href.endsWith("/api/v1/settings/sandbox-providers")) {
+        return Response.json({
+          data: {
+            manifest: { type: "daytona" },
+            status: "ready",
+            status_reason: null
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-2",
+            command: "bash /opt/tf/tool-results/upgradepilot-upgrade.sh",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_UPGRADE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "FAILED",
+                upgradeStatus: "FAILED",
+                upgrade: {
+                  modelRepairRequired: true,
+                  runtimeChangeRequired: false
+                },
+                commands: [
+                  { command: "npm install zod@4.0.0", exitCode: 0, durationMs: 20, output: "ok" },
+                  { command: "npm ci", exitCode: 0, durationMs: 30, output: "installed" },
+                  {
+                    command: "npm run test",
+                    exitCode: 1,
+                    durationMs: 40,
+                    output: "required_error is deprecated"
+                  }
+                ]
+              }),
+              "UPGRADEPILOT_UPGRADE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "retained" }
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-2/cleanup")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-2",
+            cleanup: { status: "deleted" }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    const result = await client.runNpmUpgradeSandbox({
+      repositoryUrl: "https://github.com/acme/demo",
+      packageManager: "npm",
+      packageName: "zod",
+      targetVersion: "4.0.0"
+    });
+
+    expect(result.status).toBe("FAILED");
+    expect(result.modelRepairRequired).toBe(true);
+    expect(result.sandboxId).toBe("default.sandbox-2");
+    expect(result.cleanup).toEqual({ status: "retained" });
+
+    await expect(
+      client.cleanupNpmUpgradeSandbox({ sandboxId: "default.sandbox-2" })
+    ).resolves.toBeUndefined();
+    expect(requests.at(-1)).toMatchObject({
+      method: "POST",
+      url: "http://trueforge.test/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-2/cleanup",
+      body: {}
+    });
   });
 
   it("parses upgrade workflow failures that require repair handoff", () => {

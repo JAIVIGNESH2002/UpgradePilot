@@ -100,13 +100,22 @@ type NpmBaselineSandboxRunResponse = {
     exit_code: number;
     output: string;
     cleanup: {
-      status: "deleted" | "failed";
+      status: "deleted" | "retained" | "failed";
       error?: string;
     };
   };
 };
 
 type NpmUpgradeSandboxRunResponse = NpmBaselineSandboxRunResponse;
+
+type NpmUpgradeRepairContextResponse = {
+  data: {
+    sandbox_id: string;
+    command: string;
+    exit_code: number;
+    context: string;
+  };
+};
 
 type TrueForgeBaselineWorkflowResult = {
   overallStatus: BaselineStatus;
@@ -134,6 +143,7 @@ type TrueForgeUpgradeWorkflowResult = {
   package?: {
     skippedScripts?: VerificationScriptName[];
   };
+  changedFiles?: Array<{ path: string; content: string }>;
   commands: CommandResult[];
 };
 
@@ -355,6 +365,7 @@ export class TrueForgeClient {
         package_manager: input.packageManager,
         package_name: input.packageName,
         target_version: input.targetVersion,
+        retain_failed_sandbox: true,
         timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_UPGRADE_TIMEOUT_SECONDS", 10 * 60)
       }
     );
@@ -370,7 +381,22 @@ export class TrueForgeClient {
       exitCode: run.data.exit_code
     });
 
-    return mapUpgradeWorkflowResult(workflowResult);
+    return mapUpgradeWorkflowResult(workflowResult, {
+      sandboxId: run.data.sandbox_id,
+      cleanup: run.data.cleanup
+    });
+  }
+
+  async cleanupNpmUpgradeSandbox(input: { sandboxId: string }): Promise<void> {
+    const response = await this.postJson<{
+      data: { cleanup: { status: "deleted" | "retained" | "failed"; error?: string } };
+    }>(`/api/v1/sandboxes/npm-upgrade-runs/${encodeURIComponent(input.sandboxId)}/cleanup`, {});
+
+    if (response.data.cleanup.status === "failed") {
+      throw new TrueForgeIntegrationError(
+        `TrueForge upgrade sandbox cleanup failed: ${response.data.cleanup.error ?? "unknown cleanup error"}.`
+      );
+    }
   }
 
   async runNpmUpgradeRepairHandoff(input: {
@@ -413,7 +439,8 @@ export class TrueForgeClient {
           ? `TrueForge repair agent handoff failed: ${lastError.message}`
           : "TrueForge repair agent handoff failed.",
       sessionId: lastError instanceof TrueForgeTurnExecutionError ? lastError.sessionId : null,
-      turnId: lastError instanceof TrueForgeTurnExecutionError ? lastError.turnId : null
+      turnId: lastError instanceof TrueForgeTurnExecutionError ? lastError.turnId : null,
+      verificationResult: null
     };
   }
 
@@ -424,6 +451,22 @@ export class TrueForgeClient {
     targetVersion: string;
     verificationResult: UpgradeVerificationResult;
   }): Promise<UpgradeRepairHandoffResult> {
+    if (!input.verificationResult.sandboxId) {
+      return {
+        status: "failed",
+        summary:
+          "TrueForge repair could not run because the failed upgrade sandbox was not retained.",
+        sessionId: null,
+        turnId: null,
+        verificationResult: null
+      };
+    }
+
+    const repairContext = await this.collectNpmUpgradeRepairContext({
+      sandboxId: input.verificationResult.sandboxId,
+      packageManager: packageManagerFromCommands(input.verificationResult.commands),
+      packageName: input.packageName
+    });
     const modelName = await this.getDefaultModelName();
     const session = await this.postJson<SessionResponse>("/api/v1/sessions", {
       agent: {
@@ -435,7 +478,7 @@ export class TrueForgeClient {
               reasoning_effort: process.env.TRUEFORGE_REPAIR_REASONING_EFFORT ?? "low",
               parallel_tool_calls: false,
               tool_choice: "none",
-              max_tokens: readPositiveIntegerEnv("TRUEFORGE_REPAIR_MAX_TOKENS", 800)
+              max_tokens: readPositiveIntegerEnv("TRUEFORGE_REPAIR_MAX_TOKENS", 2_400)
             }
           },
           instructions: [
@@ -464,7 +507,7 @@ export class TrueForgeClient {
         input: [
           {
             type: "user.message",
-            content: buildUpgradeRepairHandoffPrompt(input)
+            content: buildUpgradeRepairHandoffPrompt({ ...input, repairContext })
           }
         ],
         previous_turn_id: "none",
@@ -486,14 +529,90 @@ export class TrueForgeClient {
       );
     }
 
-    const summary = extractRepairSummary(completedTurn);
+    const repairPatch = extractRepairPatch(completedTurn);
+
+    if (
+      !repairPatch.unifiedDiff &&
+      repairPatch.fileReplacements.length === 0 &&
+      repairPatch.textReplacements.length === 0
+    ) {
+      return {
+        status: "failed",
+        summary: repairPatch.summary,
+        sessionId: session.data.id,
+        turnId: turn.data.id,
+        verificationResult: null
+      };
+    }
+
+    const verificationResult = await this.verifyNpmUpgradeRepair({
+      sandboxId: input.verificationResult.sandboxId,
+      packageManager: packageManagerFromCommands(input.verificationResult.commands),
+      unifiedDiff: repairPatch.unifiedDiff,
+      fileReplacements: repairPatch.fileReplacements,
+      textReplacements: repairPatch.textReplacements
+    });
 
     return {
       status: "completed",
-      summary,
+      summary: repairPatch.summary,
       sessionId: session.data.id,
-      turnId: turn.data.id
+      turnId: turn.data.id,
+      verificationResult
     };
+  }
+
+  private async collectNpmUpgradeRepairContext(input: {
+    sandboxId: string;
+    packageManager: VerificationPackageManager;
+    packageName: string;
+  }): Promise<string> {
+    const response = await this.postJson<NpmUpgradeRepairContextResponse>(
+      `/api/v1/sandboxes/npm-upgrade-runs/${encodeURIComponent(input.sandboxId)}/repair-context`,
+      {
+        package_manager: input.packageManager,
+        package_name: input.packageName,
+        timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_REPAIR_CONTEXT_TIMEOUT_SECONDS", 120)
+      }
+    );
+
+    if (response.data.exit_code !== 0) {
+      throw new TrueForgeIntegrationError(
+        `TrueForge repair context collection failed: ${response.data.context}`
+      );
+    }
+
+    return response.data.context;
+  }
+
+  private async verifyNpmUpgradeRepair(input: {
+    sandboxId: string;
+    packageManager: VerificationPackageManager;
+    unifiedDiff: string | null;
+    fileReplacements: RepairFileReplacement[];
+    textReplacements: RepairTextReplacement[];
+  }): Promise<UpgradeVerificationResult> {
+    const response = await this.postJson<NpmUpgradeSandboxRunResponse>(
+      `/api/v1/sandboxes/npm-upgrade-runs/${encodeURIComponent(input.sandboxId)}/repair-verifications`,
+      {
+        package_manager: input.packageManager,
+        ...(input.textReplacements.length > 0
+          ? { text_replacements: input.textReplacements }
+          : input.fileReplacements.length > 0
+          ? { file_replacements: input.fileReplacements }
+          : { unified_diff: input.unifiedDiff }),
+        timeout_seconds: readPositiveIntegerEnv("TRUEFORGE_REPAIR_VERIFY_TIMEOUT_SECONDS", 10 * 60)
+      }
+    );
+    const workflowResult = parseUpgradeWorkflowResult(response.data.output, {
+      command: response.data.command,
+      exitCode: response.data.exit_code
+    });
+
+    return mapUpgradeWorkflowResult(workflowResult, {
+      sandboxId: response.data.sandbox_id,
+      cleanup: response.data.cleanup
+    });
   }
 
   private async waitForTurn(sessionId: string, turnId: string): Promise<TurnResponse["data"]> {
@@ -748,6 +867,10 @@ export class TrueForgeSandboxProvider implements SandboxProvider {
   }): Promise<UpgradeRepairHandoffResult> {
     return this.client.runNpmUpgradeRepairHandoff(input);
   }
+
+  async cleanupUpgradeSandbox(input: { sandboxId: string }): Promise<void> {
+    return this.client.cleanupNpmUpgradeSandbox(input);
+  }
 }
 
 function normalizeBaseUrl(input: string): string {
@@ -946,7 +1069,11 @@ function describeMissingWorkflowMarkers({
 }
 
 function mapUpgradeWorkflowResult(
-  result: TrueForgeUpgradeWorkflowResult
+  result: TrueForgeUpgradeWorkflowResult,
+  lifecycle: {
+    sandboxId: string | null;
+    cleanup: UpgradeVerificationResult["cleanup"];
+  } = { sandboxId: null, cleanup: null }
 ): UpgradeVerificationResult {
   return {
     status: result.upgradeStatus,
@@ -954,7 +1081,15 @@ function mapUpgradeWorkflowResult(
     skippedScripts: result.package?.skippedScripts ?? [],
     modelRepairRequired: result.upgrade?.modelRepairRequired ?? result.upgradeStatus === "FAILED",
     runtimeChangeRequired:
-      result.upgrade?.runtimeChangeRequired ?? result.upgradeStatus === "BLOCKED"
+      result.upgrade?.runtimeChangeRequired ?? result.upgradeStatus === "BLOCKED",
+    sandboxId: lifecycle.sandboxId,
+    cleanup: lifecycle.cleanup,
+    changedFiles: Array.isArray(result.changedFiles)
+      ? result.changedFiles.filter(
+          (file): file is { path: string; content: string } =>
+            typeof file.path === "string" && typeof file.content === "string"
+        )
+      : []
   };
 }
 
@@ -964,14 +1099,22 @@ function buildUpgradeRepairHandoffPrompt(input: {
   currentVersion: string;
   targetVersion: string;
   verificationResult: UpgradeVerificationResult;
+  repairContext: string;
 }): string {
   return JSON.stringify({
-    task: "upgradepilot_dependency_repair_handoff",
+    task: "upgradepilot_dependency_repair",
     constraints: [
       "Do not run commands or use tools.",
-      "Do not claim repository files were changed.",
+      "Prefer textReplacements over fileReplacements and unifiedDiff for application-code compatibility fixes.",
+      "For textReplacements, return short exact old_text/new_text edits using paths relative to the repository root. old_text must appear exactly once in repairContext.",
+      "Use fileReplacements only if exact text replacement is unsafe. Use unifiedDiff only if neither structured edit format is practical.",
+      "Do not wrap JSON, replacement content, text replacement strings, or unifiedDiff in Markdown fences.",
+      "Do not weaken, skip, delete, or disable tests.",
+      "Do not edit lockfiles, package.json dependency versions, CI config, or verification scripts.",
+      "Only repair application/source/test code needed for compatibility with the target dependency.",
       "Do not decide routine verification steps; those were already executed deterministically.",
-      "If the evidence points to a runtime/install requirement, mark the next action as blocked.",
+      "Application source code changes are expected in this step and must not be treated as blocked.",
+      "Only block when the evidence points to a runtime/install requirement, missing source context, unsafe test weakening, or a change outside application/source/test code.",
       "Return only JSON."
     ],
     repository: {
@@ -994,46 +1137,163 @@ function buildUpgradeRepairHandoffPrompt(input: {
         output: truncateCommandOutput(command.output, 1200)
       }))
     },
+    repairContext: truncateCommandOutput(input.repairContext, 40_000),
     responseShape: {
       summary: "one concise sentence",
       likelyCause: "brief observed compatibility diagnosis",
-      nextRepairAction: "specific next repair action for a future repair implementation",
-      confidence: "low | medium | high"
+      textReplacements: [
+        {
+          path: "relative/source/file/path.ts",
+          old_text: "exact original text from repairContext",
+          new_text: "replacement text"
+        }
+      ],
+      fileReplacements: [
+        {
+          path: "relative/source/file/path.ts",
+          content: "complete replacement file content"
+        }
+      ],
+      unifiedDiff:
+        "optional complete git-compatible unified diff; empty string when fileReplacements is provided or blocked",
+      confidence: "low | medium | high",
+      blockedReason:
+        "only when no safe patch should be applied; never use this merely because application source code must change"
     }
   });
 }
 
-function extractRepairSummary(turn: TurnResponse["data"]): string {
+function extractRepairPatch(turn: TurnResponse["data"]): {
+  summary: string;
+  unifiedDiff: string | null;
+  fileReplacements: RepairFileReplacement[];
+  textReplacements: RepairTextReplacement[];
+} {
   if (turn.state.status !== "done") {
-    return "TrueForge repair agent handoff completed without a final response.";
+    return {
+      summary: "TrueForge repair agent completed without a final response.",
+      unifiedDiff: null,
+      fileReplacements: [],
+      textReplacements: []
+    };
   }
 
   const text = trueForgeContentToText(turn.state.output?.content).trim();
 
   if (!text) {
-    return "TrueForge repair agent handoff completed without a final response.";
+    return {
+      summary: "TrueForge repair agent completed without a final response.",
+      unifiedDiff: null,
+      fileReplacements: [],
+      textReplacements: []
+    };
   }
 
   try {
-    const parsed = JSON.parse(text) as {
+    const parsed = JSON.parse(stripJsonFence(text)) as {
       summary?: unknown;
       likelyCause?: unknown;
-      nextRepairAction?: unknown;
+      unifiedDiff?: unknown;
+      fileReplacements?: unknown;
+      textReplacements?: unknown;
+      blockedReason?: unknown;
     };
     const details = [
       typeof parsed.summary === "string" ? parsed.summary : null,
       typeof parsed.likelyCause === "string" ? `Likely cause: ${parsed.likelyCause}` : null,
-      typeof parsed.nextRepairAction === "string"
-        ? `Next repair action: ${parsed.nextRepairAction}`
-        : null
+      typeof parsed.blockedReason === "string" ? `Blocked: ${parsed.blockedReason}` : null
     ].filter(Boolean);
+    const unifiedDiff = typeof parsed.unifiedDiff === "string" ? parsed.unifiedDiff.trim() : "";
+    const textReplacements = parseRepairTextReplacements(parsed.textReplacements);
+    const fileReplacements = parseRepairFileReplacements(parsed.fileReplacements);
 
-    return details.length > 0
-      ? truncateCommandOutput(details.join("\n"))
-      : truncateCommandOutput(text);
+    return {
+      summary:
+        details.length > 0
+          ? truncateCommandOutput(details.join("\n"))
+          : truncateCommandOutput(text),
+      unifiedDiff: unifiedDiff === "" ? null : unifiedDiff,
+      fileReplacements,
+      textReplacements
+    };
   } catch {
-    return truncateCommandOutput(text);
+    return {
+      summary: truncateCommandOutput(text),
+      unifiedDiff: null,
+      fileReplacements: [],
+      textReplacements: []
+    };
   }
+}
+
+type RepairFileReplacement = {
+  path: string;
+  content: string;
+};
+
+type RepairTextReplacement = {
+  path: string;
+  old_text: string;
+  new_text: string;
+};
+
+function parseRepairTextReplacements(value: unknown): RepairTextReplacement[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (
+        item &&
+        typeof item === "object" &&
+        typeof (item as { path?: unknown }).path === "string" &&
+        typeof (item as { old_text?: unknown }).old_text === "string" &&
+        typeof (item as { new_text?: unknown }).new_text === "string"
+      ) {
+        return {
+          path: (item as { path: string }).path,
+          old_text: (item as { old_text: string }).old_text,
+          new_text: (item as { new_text: string }).new_text
+        };
+      }
+      return null;
+    })
+    .filter((item): item is RepairTextReplacement => item !== null);
+}
+
+function parseRepairFileReplacements(value: unknown): RepairFileReplacement[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (
+        item &&
+        typeof item === "object" &&
+        typeof (item as { path?: unknown }).path === "string" &&
+        typeof (item as { content?: unknown }).content === "string"
+      ) {
+        return {
+          path: (item as { path: string }).path,
+          content: (item as { content: string }).content
+        };
+      }
+      return null;
+    })
+    .filter((item): item is RepairFileReplacement => item !== null);
+}
+
+function stripJsonFence(text: string): string {
+  const trimmed = text.trim();
+  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
+
+  return match?.[1] ? match[1].trim() : trimmed;
+}
+
+function packageManagerFromCommands(commands: CommandResult[]): VerificationPackageManager {
+  return commands.some((command) => command.command.startsWith("pnpm ")) ? "pnpm" : "npm";
 }
 
 function formatTurnEventDiagnostic(event: Record<string, unknown>): string {

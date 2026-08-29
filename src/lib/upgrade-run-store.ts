@@ -5,7 +5,7 @@ import { TrueForgeSandboxProvider } from "@/lib/trueforge";
 import type { CommandResult, VerificationPackageManager } from "@/lib/verification";
 
 export type UpgradeRunStatus = "running" | "completed";
-export type UpgradeRunOutcome = "verified" | "blocked" | "repair_simulated" | "interrupted";
+export type UpgradeRunOutcome = "verified" | "blocked" | "repair_failed" | "interrupted";
 export type UpgradeRunStepStatus = WorkspaceBaselineStepStatus;
 
 export type UpgradeRunStep = {
@@ -28,6 +28,19 @@ export type UpgradeRunSnapshot = {
   steps: UpgradeRunStep[];
   startedAt: string;
   updatedAt: string | null;
+  changedFiles: UpgradeRunChangedFile[];
+  pullRequest: UpgradeRunPullRequest | null;
+};
+
+export type UpgradeRunChangedFile = {
+  path: string;
+  content: string;
+};
+
+export type UpgradeRunPullRequest = {
+  url: string;
+  number: number;
+  branchName: string;
 };
 
 export type UpgradeVerificationResult = {
@@ -36,6 +49,12 @@ export type UpgradeVerificationResult = {
   skippedScripts: string[];
   modelRepairRequired: boolean;
   runtimeChangeRequired: boolean;
+  sandboxId: string | null;
+  cleanup: {
+    status: "deleted" | "retained" | "failed";
+    error?: string;
+  } | null;
+  changedFiles?: UpgradeRunChangedFile[];
 };
 
 export type UpgradeRepairHandoffResult = {
@@ -43,6 +62,7 @@ export type UpgradeRepairHandoffResult = {
   summary: string;
   sessionId: string | null;
   turnId: string | null;
+  verificationResult: UpgradeVerificationResult | null;
 };
 
 type UpgradeRunRecord = UpgradeRunSnapshot & {
@@ -73,6 +93,7 @@ type StartUpgradeRunOptions = {
     targetVersion: string;
     verificationResult: UpgradeVerificationResult;
   }) => Promise<UpgradeRepairHandoffResult>;
+  cleanupUpgradeSandbox?: (input: { sandboxId: string }) => Promise<void>;
 };
 
 const upgradeRuns = new Map<string, UpgradeRunRecord>();
@@ -144,6 +165,8 @@ export function startUpgradeRun(
     steps: runningUpgradeSteps(steps, 0),
     startedAt: new Date(now).toISOString(),
     updatedAt: null,
+    changedFiles: [],
+    pullRequest: null,
     startedAtMs: now
   };
 
@@ -162,7 +185,10 @@ export function startUpgradeRun(
       ((verificationInput) => new TrueForgeSandboxProvider().runUpgrade(verificationInput)),
     runRepairHandoff:
       options.runRepairHandoff ??
-      ((repairInput) => new TrueForgeSandboxProvider().runUpgradeRepairHandoff(repairInput))
+      ((repairInput) => new TrueForgeSandboxProvider().runUpgradeRepairHandoff(repairInput)),
+    cleanupUpgradeSandbox:
+      options.cleanupUpgradeSandbox ??
+      ((cleanupInput) => new TrueForgeSandboxProvider().cleanupUpgradeSandbox(cleanupInput))
   });
 
   return snapshotUpgradeRun(record);
@@ -176,6 +202,23 @@ export function getUpgradeRun(runId: string): UpgradeRunSnapshot | null {
 
 export function clearUpgradeRunsForTests() {
   upgradeRuns.clear();
+}
+
+export function markUpgradeRunPullRequest(
+  runId: string,
+  pullRequest: UpgradeRunPullRequest
+): UpgradeRunSnapshot | null {
+  const record = upgradeRuns.get(runId);
+
+  if (!record) {
+    return null;
+  }
+
+  record.pullRequest = pullRequest;
+  record.updatedAt = new Date().toISOString();
+  upgradeRuns.set(runId, record);
+
+  return snapshotUpgradeRun(record);
 }
 
 function snapshotUpgradeRun(record: UpgradeRunRecord): UpgradeRunSnapshot {
@@ -198,7 +241,8 @@ async function completeUpgradeRun({
   runId,
   input,
   runVerification,
-  runRepairHandoff
+  runRepairHandoff,
+  cleanupUpgradeSandbox
 }: {
   runId: string;
   input: {
@@ -209,6 +253,7 @@ async function completeUpgradeRun({
   };
   runVerification: NonNullable<StartUpgradeRunOptions["runVerification"]>;
   runRepairHandoff: NonNullable<StartUpgradeRunOptions["runRepairHandoff"]>;
+  cleanupUpgradeSandbox: NonNullable<StartUpgradeRunOptions["cleanupUpgradeSandbox"]>;
 }) {
   const record = upgradeRuns.get(runId);
 
@@ -218,24 +263,59 @@ async function completeUpgradeRun({
 
   try {
     const result = await runVerification(input);
-    const repairHandoff = result.modelRepairRequired
-      ? await runRepairHandoff({
-          repositoryUrl: input.repositoryUrl,
-          packageName: record.packageName,
-          currentVersion: record.currentVersion,
-          targetVersion: record.targetVersion,
-          verificationResult: result
-        })
-      : null;
+    let repairHandoff: UpgradeRepairHandoffResult | null = null;
+    let cleanupOutput: string | null = null;
+    let finalResult = result;
+
+    try {
+      if (result.modelRepairRequired) {
+        const repairAttempts: UpgradeRepairHandoffResult[] = [];
+        const maxRepairAttempts = readRepairMaxAttempts();
+
+        while (
+          repairAttempts.length < maxRepairAttempts &&
+          finalResult.modelRepairRequired &&
+          finalResult.status === "FAILED" &&
+          finalResult.sandboxId
+        ) {
+          const attempt = await runRepairHandoff({
+            repositoryUrl: input.repositoryUrl,
+            packageName: record.packageName,
+            currentVersion: record.currentVersion,
+            targetVersion: record.targetVersion,
+            verificationResult: finalResult
+          });
+          repairAttempts.push(attempt);
+          repairHandoff = mergeRepairAttempts(repairAttempts);
+
+          if (!attempt.verificationResult) {
+            break;
+          }
+
+          finalResult = attempt.verificationResult;
+        }
+      }
+    } finally {
+      cleanupOutput =
+        result.cleanup?.status === "retained" && result.sandboxId !== null
+          ? await cleanupRetainedUpgradeSandbox({
+              sandboxId: result.sandboxId,
+              cleanupUpgradeSandbox
+            })
+          : null;
+    }
+
     record.status = "completed";
     record.outcome =
-      result.status === "VERIFIED"
+      finalResult.status === "VERIFIED"
         ? "verified"
-        : result.status === "BLOCKED"
+        : finalResult.status === "BLOCKED"
           ? "blocked"
-          : "repair_simulated";
-    record.message = upgradeRunMessage(result);
-    record.steps = completedUpgradeSteps(record.steps, result, repairHandoff);
+          : "repair_failed";
+    record.message = upgradeRunMessage(finalResult, repairHandoff);
+    record.steps = completedUpgradeSteps(record.steps, result, repairHandoff, cleanupOutput);
+    record.changedFiles =
+      finalResult.status === "VERIFIED" ? (finalResult.changedFiles ?? []) : [];
   } catch (error) {
     record.status = "completed";
     record.outcome = "interrupted";
@@ -250,6 +330,26 @@ async function completeUpgradeRun({
     record.updatedAt = new Date().toISOString();
     upgradeRuns.set(runId, record);
   }
+}
+
+function readRepairMaxAttempts(): number {
+  const parsed = Number.parseInt(process.env.UPGRADEPILOT_REPAIR_MAX_ATTEMPTS ?? "2", 10);
+
+  return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 3) : 2;
+}
+
+function mergeRepairAttempts(attempts: UpgradeRepairHandoffResult[]): UpgradeRepairHandoffResult {
+  const lastAttempt = attempts.at(-1);
+
+  return {
+    status: attempts.every((attempt) => attempt.status === "completed") ? "completed" : "failed",
+    summary: attempts
+      .map((attempt, index) => `Attempt ${index + 1}: ${attempt.summary}`)
+      .join("\n\n"),
+    sessionId: lastAttempt?.sessionId ?? null,
+    turnId: lastAttempt?.turnId ?? null,
+    verificationResult: lastAttempt?.verificationResult ?? null
+  };
 }
 
 function completedRun({
@@ -283,7 +383,9 @@ function completedRun({
     message,
     steps,
     startedAt: now,
-    updatedAt: now
+    updatedAt: now,
+    changedFiles: [],
+    pullRequest: null
   };
 
   upgradeRuns.set(id, { ...snapshot, startedAtMs: Date.now() });
@@ -335,8 +437,8 @@ function plannedUpgradeSteps({
       output: null
     },
     {
-      name: "Repair agent handoff",
-      command: "TrueForge repair agent handoff",
+      name: "Repair and re-verify",
+      command: "TrueForge repair agent + deterministic verification",
       status: "pending",
       durationMs: null,
       output: null
@@ -361,7 +463,8 @@ function runningUpgradeSteps(steps: UpgradeRunStep[], activeStepIndex: number): 
 function completedUpgradeSteps(
   plannedSteps: UpgradeRunStep[],
   result: UpgradeVerificationResult,
-  repairHandoff: UpgradeRepairHandoffResult | null
+  repairHandoff: UpgradeRepairHandoffResult | null,
+  cleanupOutput: string | null
 ): UpgradeRunStep[] {
   const cloneCommand = result.commands.find((command) => command.command.startsWith("git clone"));
   const upgradeCommand = result.commands.find(
@@ -405,15 +508,23 @@ function completedUpgradeSteps(
       return verificationStep(step, installCommand, verificationCommands);
     }
 
-    if (step.name === "Repair agent handoff") {
+    if (step.name === "Repair and re-verify") {
       if (result.modelRepairRequired) {
+        const repairVerification = repairHandoff?.verificationResult;
         return {
           ...step,
-          status: repairHandoff?.status === "failed" ? "failed" : "passed",
-          durationMs: 0,
+          status:
+            repairHandoff?.status === "completed" && repairVerification?.status === "VERIFIED"
+              ? "passed"
+              : "failed",
+          durationMs: repairVerification
+            ? repairVerification.commands.reduce((total, command) => total + command.durationMs, 0)
+            : 0,
           output: repairHandoff
-            ? repairHandoff.summary
-            : "Model repair handoff was requested, but no handoff result was returned."
+            ? [repairHandoff.summary, repairVerificationSummary(repairVerification), cleanupOutput]
+                .filter(Boolean)
+                .join("\n\n")
+            : "Model repair was requested, but no repair result was returned."
         };
       }
 
@@ -483,9 +594,54 @@ function verificationStep(
   };
 }
 
-function upgradeRunMessage(result: UpgradeVerificationResult): string {
+async function cleanupRetainedUpgradeSandbox({
+  sandboxId,
+  cleanupUpgradeSandbox
+}: {
+  sandboxId: string;
+  cleanupUpgradeSandbox: NonNullable<StartUpgradeRunOptions["cleanupUpgradeSandbox"]>;
+}): Promise<string> {
+  try {
+    await cleanupUpgradeSandbox({ sandboxId });
+    return `Retained sandbox ${sandboxId} was deleted after the repair handoff cycle.`;
+  } catch (error) {
+    return error instanceof Error
+      ? `Retained sandbox cleanup failed: ${error.message}`
+      : "Retained sandbox cleanup failed.";
+  }
+}
+
+function repairVerificationSummary(
+  result: UpgradeVerificationResult | null | undefined
+): string | null {
+  if (!result) {
+    return null;
+  }
+
   if (result.status === "VERIFIED") {
-    return "Upgrade verified. The target version installed and all discovered checks passed.";
+    return "Repair was applied and deterministic verification passed.";
+  }
+
+  const failedCommand = result.commands.find((command) => command.exitCode !== 0);
+
+  return failedCommand
+    ? [
+        `Repair was applied, but ${failedCommand.command} still failed.`,
+        failedCommand.output.trim() ? failedCommand.output.trim() : null
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "Repair verification did not pass.";
+}
+
+function upgradeRunMessage(
+  result: UpgradeVerificationResult,
+  repairHandoff: UpgradeRepairHandoffResult | null = null
+): string {
+  if (result.status === "VERIFIED") {
+    return repairHandoff
+      ? "Upgrade verified after repair. The repaired upgrade passed deterministic verification."
+      : "Upgrade verified. The target version installed and all discovered checks passed.";
   }
 
   if (result.status === "BLOCKED") {
@@ -495,7 +651,7 @@ function upgradeRunMessage(result: UpgradeVerificationResult): string {
   }
 
   return result.modelRepairRequired
-    ? "Upgrade changed CI behavior. TrueForge repair agent handoff completed; applying fixes comes next."
+    ? "Upgrade changed CI behavior and the repair cycle did not produce a verified result."
     : "Upgrade verification failed.";
 }
 
@@ -511,6 +667,8 @@ function sanitizeRecord(record: UpgradeRunRecord): UpgradeRunSnapshot {
     message: record.message,
     steps: record.steps,
     startedAt: record.startedAt,
-    updatedAt: record.updatedAt
+    updatedAt: record.updatedAt,
+    changedFiles: record.changedFiles,
+    pullRequest: record.pullRequest
   };
 }

@@ -13,7 +13,8 @@ import {
   Plus,
   Search,
   Trash2,
-  XCircle
+  XCircle,
+  GitPullRequest
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -51,6 +52,10 @@ type UpgradePreparationState =
   | { status: "preparing"; dependencyName: string }
   | { status: "ready"; dependencyName: string; message: string }
   | { status: "error"; dependencyName: string; message: string };
+type PullRequestState =
+  | { status: "idle" }
+  | { status: "creating"; runId: string }
+  | { status: "error"; runId: string; message: string };
 type RepositoryRefreshState =
   | { status: "idle" }
   | { status: "loading"; repositoryId: string }
@@ -91,6 +96,7 @@ export function RepositoryWorkspace() {
     status: "idle"
   });
   const [activeUpgradeRun, setActiveUpgradeRun] = useState<UpgradeRunSnapshot | null>(null);
+  const [pullRequestState, setPullRequestState] = useState<PullRequestState>({ status: "idle" });
   const [verifiedUpgradeKeys, setVerifiedUpgradeKeys] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DependencyFilter>("all");
@@ -498,6 +504,27 @@ export function RepositoryWorkspace() {
     }
   }
 
+  async function createPullRequest(run: UpgradeRunSnapshot) {
+    setPullRequestState({ status: "creating", runId: run.id });
+
+    try {
+      const response = await fetch("/api/repositories/upgrade-runs/pull-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: run.id })
+      });
+      const nextRun = await parseUpgradeRunResponse(response);
+      setActiveUpgradeRun(nextRun);
+      setPullRequestState({ status: "idle" });
+    } catch (error) {
+      setPullRequestState({
+        status: "error",
+        runId: run.id,
+        message: error instanceof Error ? error.message : "Pull request creation failed."
+      });
+    }
+  }
+
   async function parseUpgradeRunResponse(response: Response) {
     const body = (await response.json()) as UpgradeRunResponse;
 
@@ -560,6 +587,8 @@ export function RepositoryWorkspace() {
               repository={selectedRepository}
               run={activeUpgradeRun}
               onBack={() => setActiveUpgradeRun(null)}
+              pullRequestState={pullRequestState}
+              onCreatePullRequest={createPullRequest}
             />
           ) : hasLoadedWorkspace ? (
             <RepositoryDetail
@@ -740,14 +769,29 @@ function RepositorySidebarItem({
 function UpgradeRunDetail({
   repository,
   run,
-  onBack
+  onBack,
+  pullRequestState,
+  onCreatePullRequest
 }: {
   repository: WorkspaceRepository;
   run: UpgradeRunSnapshot;
   onBack: () => void;
+  pullRequestState: PullRequestState;
+  onCreatePullRequest: (run: UpgradeRunSnapshot) => void;
 }) {
   const progressValue = upgradeRunProgressValue(run);
   const isRunning = run.status === "running";
+  const canCreatePullRequest =
+    run.status === "completed" &&
+    run.outcome === "verified" &&
+    run.changedFiles.length > 0 &&
+    run.pullRequest === null;
+  const isCreatingPullRequest =
+    pullRequestState.status === "creating" && pullRequestState.runId === run.id;
+  const pullRequestError =
+    pullRequestState.status === "error" && pullRequestState.runId === run.id
+      ? pullRequestState.message
+      : null;
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6">
@@ -768,9 +812,36 @@ function UpgradeRunDetail({
             {run.targetVersion}
           </p>
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-sm">
-          <UpgradeRunStatusIcon run={run} />
-          <span className="font-medium">{upgradeRunStatusLabel(run)}</span>
+        <div className="flex flex-col items-start gap-2 sm:items-end">
+          <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-sm">
+            <UpgradeRunStatusIcon run={run} />
+            <span className="font-medium">{upgradeRunStatusLabel(run)}</span>
+          </div>
+          {run.pullRequest ? (
+            <Button asChild size="sm" variant="outline">
+              <a href={run.pullRequest.url} target="_blank" rel="noreferrer">
+                <GitPullRequest className="size-4" aria-hidden="true" />
+                PR #{run.pullRequest.number}
+              </a>
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              disabled={!canCreatePullRequest || isCreatingPullRequest}
+              onClick={() => onCreatePullRequest(run)}
+            >
+              {isCreatingPullRequest ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <GitPullRequest className="size-4" aria-hidden="true" />
+              )}
+              Create PR
+            </Button>
+          )}
+          {pullRequestError ? (
+            <p className="max-w-xs text-right text-xs text-destructive">{pullRequestError}</p>
+          ) : null}
         </div>
       </div>
 
@@ -1573,7 +1644,7 @@ function upgradeRunStatusLabel(run: UpgradeRunSnapshot) {
     return "Interrupted";
   }
 
-  return "Repair handoff";
+  return "Repair failed";
 }
 
 function upgradeVerificationKey({

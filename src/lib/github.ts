@@ -24,6 +24,35 @@ type GitHubRepositoryApiResponse = {
   updated_at: string;
 };
 
+type GitHubRefResponse = {
+  object: {
+    sha: string;
+  };
+};
+
+type GitHubContentResponse = {
+  sha: string;
+};
+
+type GitHubPullRequestResponse = {
+  html_url: string;
+  number: number;
+};
+
+export type GitHubPullRequestInput = {
+  repositoryUrl: string;
+  branchName: string;
+  title: string;
+  body: string;
+  files: Array<{ path: string; content: string }>;
+};
+
+export type GitHubPullRequestResult = {
+  url: string;
+  number: number;
+  branchName: string;
+};
+
 export class GitHubRepositoryError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -84,6 +113,78 @@ export class GitHubClient {
       defaultBranch: response.default_branch,
       language: response.language,
       updatedAt: response.updated_at
+    };
+  }
+
+  async createPullRequest(input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> {
+    if (this.token === undefined || this.token.trim() === "") {
+      throw new GitHubRepositoryError("GITHUB_TOKEN is required to create a pull request.");
+    }
+
+    const ref = parseGitHubRepositoryUrl(input.repositoryUrl);
+    const metadata = await this.getRepositoryMetadata(ref);
+    const baseRef = await this.requestJson<GitHubRefResponse>(
+      `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+        ref.name
+      )}/git/ref/heads/${encodeURIComponent(metadata.defaultBranch)}`
+    );
+
+    await this.requestJson(
+      `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+        ref.name
+      )}/git/refs`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ref: `refs/heads/${input.branchName}`,
+          sha: baseRef.object.sha
+        })
+      }
+    );
+
+    for (const file of input.files) {
+      const existingFile = await this.requestJson<GitHubContentResponse>(
+        `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+          ref.name
+        )}/contents/${encodeRepositoryPath(file.path)}?ref=${encodeURIComponent(
+          metadata.defaultBranch
+        )}`
+      );
+      await this.requestJson(
+        `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+          ref.name
+        )}/contents/${encodeRepositoryPath(file.path)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            message: `chore: verify ${input.title}`,
+            content: Buffer.from(file.content, "utf8").toString("base64"),
+            branch: input.branchName,
+            sha: existingFile.sha
+          })
+        }
+      );
+    }
+
+    const pullRequest = await this.requestJson<GitHubPullRequestResponse>(
+      `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+        ref.name
+      )}/pulls`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: input.title,
+          body: input.body,
+          head: input.branchName,
+          base: metadata.defaultBranch
+        })
+      }
+    );
+
+    return {
+      url: pullRequest.html_url,
+      number: pullRequest.number,
+      branchName: input.branchName
     };
   }
 
@@ -153,8 +254,9 @@ export class GitHubClient {
     return response.text();
   }
 
-  private async requestJson<T>(url: string): Promise<T> {
+  private async requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     const response = await this.fetchGitHub(url, {
+      ...init,
       headers: this.headers({ accept: "application/vnd.github+json" }),
       cache: "no-store"
     });
@@ -186,6 +288,13 @@ export class GitHubClient {
       throw new GitHubRepositoryError(describeGitHubNetworkFailure(error), { cause: error });
     }
   }
+}
+
+function encodeRepositoryPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
 
 function describeGitHubNetworkFailure(error: unknown): string {
