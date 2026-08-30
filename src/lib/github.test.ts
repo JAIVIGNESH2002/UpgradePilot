@@ -197,6 +197,7 @@ describe("GitHubClient", () => {
         return Response.json({
           name: "widgets",
           owner: { login: "acme" },
+          private: false,
           html_url: "https://github.com/acme/widgets",
           description: null,
           default_branch: "main",

@@ -187,21 +187,27 @@ export class TrueForgeClient {
   }
 
   async getSandboxProviderStatus(): Promise<TrueForgeSandboxProviderStatus | null> {
-    const response = await this.fetchTrueForge("/api/v1/settings/sandbox-providers", {
-      cache: "no-store"
-    });
+    const body = await this.requestTrueForge<SandboxProviderResponse | null>(
+      "/api/v1/settings/sandbox-providers",
+      { cache: "no-store" },
+      async (response) => {
+        if (response.status === 404) {
+          return null;
+        }
 
-    if (response.status === 404) {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(
+            `TrueForge returned ${response.status} while reading sandbox provider settings.`
+          );
+        }
+
+        return (await response.json()) as SandboxProviderResponse;
+      }
+    );
+
+    if (body === null) {
       return null;
     }
-
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(
-        `TrueForge returned ${response.status} while reading sandbox provider settings.`
-      );
-    }
-
-    const body = (await response.json()) as SandboxProviderResponse;
 
     return {
       type: body.data.manifest.type,
@@ -860,41 +866,53 @@ export class TrueForgeClient {
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.fetchTrueForge(path, {
-      headers: {
-        Accept: "application/json"
+    return this.requestTrueForge<T>(
+      path,
+      {
+        headers: {
+          Accept: "application/json"
+        },
+        cache: "no-store"
       },
-      cache: "no-store"
-    });
+      async (response) => {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(`TrueForge returned ${response.status} for ${path}.`);
+        }
 
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(`TrueForge returned ${response.status} for ${path}.`);
-    }
-
-    return response.json() as Promise<T>;
+        return response.json() as Promise<T>;
+      }
+    );
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const response = await this.fetchTrueForge(path, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json"
+    return this.requestTrueForge<T>(
+      path,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body),
+        cache: "no-store"
       },
-      body: JSON.stringify(body),
-      cache: "no-store"
-    });
+      async (response) => {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(
+            `TrueForge returned ${response.status} for ${path}: ${await readResponseError(response)}`
+          );
+        }
 
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(
-        `TrueForge returned ${response.status} for ${path}: ${await readResponseError(response)}`
-      );
-    }
-
-    return response.json() as Promise<T>;
+        return response.json() as Promise<T>;
+      }
+    );
   }
 
-  private async fetchTrueForge(path: string, init: RequestInit): Promise<Response> {
+  private async requestTrueForge<T>(
+    path: string,
+    init: RequestInit,
+    consume: (response: Response) => Promise<T>
+  ): Promise<T> {
     const primaryUrl = this.url(path);
     const timeoutMs = readPositiveIntegerEnv(
       "TRUEFORGE_REQUEST_TIMEOUT_MS",
@@ -903,15 +921,23 @@ export class TrueForgeClient {
     const primaryRequest = withAbortDeadline(init, timeoutMs);
 
     try {
-      return await this.fetchImpl(primaryUrl, primaryRequest.init);
+      const response = await this.fetchImpl(primaryUrl, primaryRequest.init);
+
+      return await consume(response);
     } catch (error) {
+      if (error instanceof TrueForgeIntegrationError) {
+        throw error;
+      }
+
       const fallbackUrl = localhostFallbackUrl(primaryUrl);
 
       if (fallbackUrl !== null) {
         const fallbackRequest = withAbortDeadline(init, timeoutMs);
 
         try {
-          return await this.fetchImpl(fallbackUrl, fallbackRequest.init);
+          const response = await this.fetchImpl(fallbackUrl, fallbackRequest.init);
+
+          return await consume(response);
         } catch (fallbackError) {
           throw new TrueForgeIntegrationError(
             describeTrueForgeNetworkFailure(fallbackError, this.baseUrl),

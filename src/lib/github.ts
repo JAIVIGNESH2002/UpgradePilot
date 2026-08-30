@@ -118,11 +118,6 @@ export class GitHubClient {
     const url = `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
       ref.name
     )}`;
-    const cached = readCache(metadataCache, url);
-
-    if (cached !== undefined) {
-      return cached;
-    }
 
     const response = validateRepositoryApiResponse(
       await this.requestJson<unknown>(url, {}, { maxBytes: MAX_JSON_BYTES })
