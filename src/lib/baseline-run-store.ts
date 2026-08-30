@@ -9,6 +9,7 @@ import {
 import type { RepositoryInspection } from "@/lib/package-inspection";
 import { inspectPublicNpmRepository } from "@/lib/repository-inspection";
 import type { WorkspaceBaseline, WorkspaceBaselineStep } from "@/lib/repository-workspace";
+import { readPositiveIntegerEnv } from "@/lib/run-store-retention";
 import { TrueForgeSandboxProvider } from "@/lib/trueforge";
 import type { VerificationPackageManager } from "@/lib/verification";
 import { VERIFICATION_SCRIPT_ORDER, scriptCommandForPackageManager } from "@/lib/verification";
@@ -36,6 +37,8 @@ type StartBaselineRunOptions = {
 const baselineRuns = new Map<string, BaselineRunRecord>();
 const DEFAULT_RUN_RETENTION_MS = 60 * 60 * 1000;
 const DEFAULT_MAX_RUNS = 100;
+const DEFAULT_RUNNING_RUN_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_MAX_ACTIVE_RUNS = 25;
 
 export async function startBaselineRun(
   repositoryUrl: string,
@@ -44,10 +47,28 @@ export async function startBaselineRun(
   const inspectRepository = options.inspectRepository ?? inspectPublicNpmRepository;
   const runVerification = options.runVerification ?? runBaselineVerification;
   const trimmedRepositoryUrl = repositoryUrl.trim();
+  const runId = randomUUID();
+
+  pruneBaselineRuns();
+
+  if (
+    activeBaselineRunCount() >=
+    readPositiveIntegerEnv("UPGRADEPILOT_MAX_ACTIVE_RUNS", DEFAULT_MAX_ACTIVE_RUNS)
+  ) {
+    const record = completedRun({
+      id: runId,
+      repositoryUrl: trimmedRepositoryUrl,
+      baseline: interruptedWorkspaceBaseline(
+        "Too many baseline runs are active. Retry after existing runs finish."
+      )
+    });
+    setBaselineRunRecord(record);
+    return snapshotBaselineRun(record);
+  }
+
   const inspection = await inspectRepository(trimmedRepositoryUrl, {
     token: process.env.GITHUB_TOKEN
   });
-  const runId = randomUUID();
 
   if (!isSupportedVerificationPackageManager(inspection.package.packageManager.name)) {
     const record = completedRun({
@@ -171,8 +192,22 @@ function pruneBaselineRuns() {
     DEFAULT_RUN_RETENTION_MS
   );
   const maxRuns = readPositiveIntegerEnv("UPGRADEPILOT_MAX_RUNS", DEFAULT_MAX_RUNS);
+  const runningTimeoutMs = readPositiveIntegerEnv(
+    "UPGRADEPILOT_RUNNING_RUN_TIMEOUT_MS",
+    DEFAULT_RUNNING_RUN_TIMEOUT_MS
+  );
 
   for (const [runId, record] of baselineRuns) {
+    if (record.status === "running" && now - record.updatedAtMs > runningTimeoutMs) {
+      record.status = "completed";
+      record.updatedAtMs = now;
+      record.baseline = interruptedWorkspaceBaseline(
+        "Baseline verification was interrupted after the run stopped reporting progress."
+      );
+      baselineRuns.set(runId, record);
+      continue;
+    }
+
     if (record.status === "completed" && now - record.updatedAtMs > retentionMs) {
       baselineRuns.delete(runId);
     }
@@ -191,16 +226,8 @@ function pruneBaselineRuns() {
   }
 }
 
-function readPositiveIntegerEnv(name: string, fallback: number): number {
-  const rawValue = process.env[name];
-
-  if (!rawValue) {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(rawValue, 10);
-
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+function activeBaselineRunCount(): number {
+  return [...baselineRuns.values()].filter((record) => record.status === "running").length;
 }
 
 function baselinePlannedSteps(inspection: RepositoryInspection): WorkspaceBaselineStep[] {
