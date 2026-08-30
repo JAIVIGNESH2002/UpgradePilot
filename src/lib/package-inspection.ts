@@ -102,6 +102,11 @@ export function inspectPackageFiles({
       ? extractNpmResolvedVersions(packageLock)
       : extractPnpmResolvedVersions(pnpmLockText);
 
+  const dependencies = [
+    ...extractDependencyItems(packageJson.dependencies, "dependency", resolvedVersions),
+    ...extractDependencyItems(packageJson.devDependencies, "devDependency", resolvedVersions)
+  ].slice(0, MAX_DEPENDENCIES);
+
   return {
     packageName:
       typeof packageJson.name === "string" ? limitField(packageJson.name, "package name") : null,
@@ -113,10 +118,7 @@ export function inspectPackageFiles({
     hasPackageLock: packageLock !== null,
     lockfileVersion:
       typeof packageLock?.lockfileVersion === "number" ? packageLock.lockfileVersion : null,
-    dependencies: [
-      ...extractDependencyItems(packageJson.dependencies, "dependency", resolvedVersions),
-      ...extractDependencyItems(packageJson.devDependencies, "devDependency", resolvedVersions)
-    ],
+    dependencies,
     scripts: extractScripts(packageJson.scripts)
   };
 }
@@ -140,7 +142,6 @@ function extractDependencyItems(
 
   return Object.entries(input)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    .slice(0, MAX_DEPENDENCIES)
     .map(([packageName, currentVersion]) => ({
       packageName: limitField(packageName, "dependency name"),
       currentVersion: limitField(currentVersion, "dependency version"),
@@ -156,15 +157,14 @@ function extractScripts(input: unknown): Record<string, string> {
   }
 
   return Object.entries(input)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
     .slice(0, MAX_SCRIPTS)
     .reduce<Record<string, string>>((scripts, [name, command]) => {
-      if (typeof command === "string") {
-        scripts[limitField(name, "script name")] = limitField(
-          command,
-          "script command",
-          MAX_SCRIPT_LENGTH
-        );
-      }
+      scripts[limitField(name, "script name")] = limitField(
+        command,
+        "script command",
+        MAX_SCRIPT_LENGTH
+      );
 
       return scripts;
     }, {});

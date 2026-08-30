@@ -190,6 +190,47 @@ describe("inspectPackageFiles", () => {
     expect(Object.keys(inspection.scripts)).toHaveLength(100);
   });
 
+  it("applies the dependency inventory cap after combining dependency sections", () => {
+    const dependencies = Object.fromEntries(
+      Array.from({ length: 400 }, (_, index) => [
+        `dep-${index.toString().padStart(3, "0")}`,
+        "1.0.0"
+      ])
+    );
+    const devDependencies = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [
+        `dev-${index.toString().padStart(3, "0")}`,
+        "1.0.0"
+      ])
+    );
+    const inspection = inspectPackageFiles({
+      packageJsonText: JSON.stringify({ dependencies, devDependencies }),
+      packageLockText: null
+    });
+
+    expect(inspection.dependencies).toHaveLength(500);
+    expect(
+      inspection.dependencies.filter((dependency) => dependency.kind === "dependency")
+    ).toHaveLength(400);
+    expect(
+      inspection.dependencies.filter((dependency) => dependency.kind === "devDependency")
+    ).toHaveLength(100);
+  });
+
+  it("caps scripts by accepted string entries only", () => {
+    const scripts = Object.fromEntries([
+      ...Array.from({ length: 100 }, (_, index) => [`ignored-${index}`, false]),
+      ...Array.from({ length: 100 }, (_, index) => [`script-${index}`, "echo ok"])
+    ]);
+    const inspection = inspectPackageFiles({
+      packageJsonText: JSON.stringify({ scripts }),
+      packageLockText: null
+    });
+
+    expect(Object.keys(inspection.scripts)).toHaveLength(100);
+    expect(inspection.scripts["script-99"]).toBe("echo ok");
+  });
+
   it("rejects oversized package fields", () => {
     expect(() =>
       inspectPackageFiles({
