@@ -59,10 +59,6 @@ Current TrueForge usage:
 - TrueForge agent/session flow for repair handoff after failed verification.
 - Explicit environment-based configuration for Daytona and Gemini via `scripts/configure-trueforge.mjs`.
 
-Dependency policy:
-
-- `clsx` is intentionally pinned to exact version `2.1.1` so installs stay aligned with the reviewed upgrade.
-
 ## Architecture
 
 ```mermaid

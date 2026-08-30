@@ -812,14 +812,14 @@ export class TrueForgeClient {
     if (turn.state.status === "done") {
       const outputText = trueForgeContentToText(turn.state.output?.content);
 
-      if (extractLineDelimitedPayload(outputText, UPGRADEPILOT_BASELINE_RESULT_MARKER) !== null) {
+      if (hasLineDelimitedPayloadOrWrapper(outputText, UPGRADEPILOT_BASELINE_RESULT_MARKER)) {
         return outputText;
       }
     }
 
     const eventTexts = await this.listTurnEventTexts(sessionId, turn.id);
-    const markedEventText = eventTexts.find(
-      (text) => extractLineDelimitedPayload(text, UPGRADEPILOT_BASELINE_RESULT_MARKER) !== null
+    const markedEventText = eventTexts.find((text) =>
+      hasLineDelimitedPayloadOrWrapper(text, UPGRADEPILOT_BASELINE_RESULT_MARKER)
     );
 
     if (markedEventText) {
@@ -1736,6 +1736,13 @@ function parseResultTextWrapper(text: string, marker: string): string | null {
   } catch {
     return null;
   }
+}
+
+function hasLineDelimitedPayloadOrWrapper(text: string, marker: string): boolean {
+  return (
+    extractLineDelimitedPayload(text, marker) !== null ||
+    parseResultTextWrapper(text, marker) !== null
+  );
 }
 
 function extractLineDelimitedPayload(text: string, marker: string): string | null {
