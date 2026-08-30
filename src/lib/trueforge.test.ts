@@ -473,6 +473,122 @@ describe("TrueForgeClient", () => {
     ]);
   });
 
+  it("fails repair enrichment instead of returning partial verified files", async () => {
+    vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+
+      if (href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-context")) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-repair-context.sh",
+            exit_code: 0,
+            context: "--- src/lib/missing.ts\nexport const value = 1;"
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/models")) {
+        return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
+      }
+
+      if (href.endsWith("/api/v1/sessions") && method === "POST") {
+        return Response.json({ data: { id: "session-1" } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns") && method === "POST") {
+        return Response.json({ data: { id: "turn-1", state: { status: "running" } } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1")) {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: {
+              status: "done",
+              output: {
+                content: JSON.stringify({
+                  summary: "Update missing source.",
+                  textReplacements: [
+                    { path: "src/lib/missing.ts", old_text: "value = 1", new_text: "value = 2" }
+                  ]
+                })
+              },
+              required_actions: []
+            }
+          }
+        });
+      }
+
+      if (
+        href.endsWith("/api/v1/sandboxes/npm-upgrade-runs/default.sandbox-1/repair-verifications")
+      ) {
+        return Response.json({
+          data: {
+            sandbox_id: "default.sandbox-1",
+            command: "bash /opt/tf/tool-results/upgradepilot-repair-verify.sh",
+            exit_code: 0,
+            output: [
+              "UPGRADEPILOT_UPGRADE_RESULT_START",
+              JSON.stringify({
+                overallStatus: "PASSED",
+                upgradeStatus: "VERIFIED",
+                upgrade: { modelRepairRequired: false, runtimeChangeRequired: false },
+                commands: [{ command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }]
+              }),
+              "UPGRADEPILOT_UPGRADE_RESULT_END"
+            ].join("\n"),
+            cleanup: { status: "retained" }
+          }
+        });
+      }
+
+      if (href === "https://api.github.com/repos/acme/demo") {
+        return Response.json({
+          name: "demo",
+          owner: { login: "acme" },
+          html_url: "https://github.com/acme/demo",
+          description: null,
+          default_branch: "main",
+          language: "TypeScript",
+          updated_at: "2026-08-30T00:00:00Z"
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(
+      client.runNpmUpgradeRepairHandoff({
+        repositoryUrl: "https://github.com/acme/demo",
+        packageName: "zod",
+        currentVersion: "3.25.0",
+        targetVersion: "4.4.3",
+        verificationResult: {
+          status: "FAILED",
+          commands: [{ command: "npm run typecheck", exitCode: 1, durationMs: 20, output: "failed" }],
+          skippedScripts: [],
+          modelRepairRequired: true,
+          runtimeChangeRequired: false,
+          sandboxId: "default.sandbox-1",
+          cleanup: { status: "retained" }
+        }
+      })
+    ).resolves.toMatchObject({
+      status: "failed",
+      summary: expect.stringContaining(
+        "Verified repair file enrichment failed for acme/demo:src/lib/missing.ts"
+      ),
+      verificationResult: null
+    });
+  });
+
   it("includes recent TrueForge events when a repair handoff reaches the iteration limit", async () => {
     vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

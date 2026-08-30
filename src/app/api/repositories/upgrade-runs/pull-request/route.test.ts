@@ -81,12 +81,27 @@ describe("POST /api/repositories/upgrade-runs/pull-request", () => {
       expect.objectContaining({
         repositoryUrl: "https://github.com/acme/widgets",
         title: "chore: upgrade react to 19.0.0",
+        body: expect.stringContaining("## Agent Changes"),
         files: [
           { path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' },
           { path: "package-lock.json", content: '{"packages":{}}\n' },
           { path: "src/lib/validation.ts", content: "export const schema = z.string();\n" }
         ]
       })
+    );
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain(
+      "`package.json`: updates the requested dependency declaration"
+    );
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain(
+      "`package-lock.json`: records the resolved dependency graph"
+    );
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain(
+      "`src/lib/validation.ts`: applies compatibility changes"
+    );
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain("## Verification Evidence");
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain("## Remaining Risk");
+    expect(createPullRequestMock.mock.calls[0]?.[0].body).toContain(
+      "No known remaining risk after successful sandbox verification"
     );
   });
 

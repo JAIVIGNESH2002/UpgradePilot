@@ -603,34 +603,44 @@ export class TrueForgeClient {
       return { ...input.verificationResult, changedFiles };
     }
 
-    try {
-      const ref = parseGitHubRepositoryUrl(input.repositoryUrl);
-      const github = new GitHubClient({
-        token: process.env.GITHUB_TOKEN,
-        fetchImpl: this.fetchImpl
-      });
-      const metadata = await github.getRepositoryMetadata(ref);
+    const ref = parseGitHubRepositoryUrl(input.repositoryUrl);
+    const github = new GitHubClient({
+      token: process.env.GITHUB_TOKEN,
+      fetchImpl: this.fetchImpl
+    });
+    const metadata = await github.getRepositoryMetadata(ref);
 
-      for (const patch of missingUnifiedDiffPatches) {
+    for (const patch of missingUnifiedDiffPatches) {
+      try {
         const originalContent =
           patch.isNewFile === true
             ? ""
             : await github.getRepositoryFileText(ref, patch.path, metadata.defaultBranch);
 
         if (originalContent === null) {
-          continue;
+          throw new TrueForgeIntegrationError(
+            `Verified repair touched ${patch.path}, but that file was not found in ${ref.owner}/${ref.name}.`
+          );
         }
 
         const repairedContent = applyUnifiedDiffPatch(originalContent, patch);
         changedFiles.push({ path: patch.path, content: repairedContent });
         includedPaths.add(patch.path);
+      } catch (error) {
+        throw describeRepairEnrichmentFailure({
+          repository: `${ref.owner}/${ref.name}`,
+          path: patch.path,
+          cause: error
+        });
+      }
+    }
+
+    for (const path of missingTextReplacementPaths) {
+      if (includedPaths.has(path)) {
+        continue;
       }
 
-      for (const path of missingTextReplacementPaths) {
-        if (includedPaths.has(path)) {
-          continue;
-        }
-
+      try {
         const originalContent = await github.getRepositoryFileText(
           ref,
           path,
@@ -638,7 +648,9 @@ export class TrueForgeClient {
         );
 
         if (originalContent === null) {
-          continue;
+          throw new TrueForgeIntegrationError(
+            `Verified repair touched ${path}, but that file was not found in ${ref.owner}/${ref.name}.`
+          );
         }
 
         const repairedContent = applyRepairTextReplacements(
@@ -650,9 +662,13 @@ export class TrueForgeClient {
           changedFiles.push({ path, content: repairedContent });
           includedPaths.add(path);
         }
+      } catch (error) {
+        throw describeRepairEnrichmentFailure({
+          repository: `${ref.owner}/${ref.name}`,
+          path,
+          cause: error
+        });
       }
-    } catch {
-      return { ...input.verificationResult, changedFiles };
     }
 
     return { ...input.verificationResult, changedFiles };
@@ -1343,6 +1359,19 @@ type UnifiedDiffFilePatch = {
     lines: Array<{ type: "context" | "add" | "remove"; content: string }>;
   }>;
 };
+
+function describeRepairEnrichmentFailure(input: {
+  repository: string;
+  path: string;
+  cause: unknown;
+}): TrueForgeIntegrationError {
+  const detail = input.cause instanceof Error ? input.cause.message : String(input.cause);
+
+  return new TrueForgeIntegrationError(
+    `Verified repair file enrichment failed for ${input.repository}:${input.path}. ${detail}`,
+    { cause: input.cause }
+  );
+}
 
 function parseUnifiedDiffFilePatches(diff: string): UnifiedDiffFilePatch[] {
   const lines = diff.replace(/\r\n/g, "\n").split("\n");

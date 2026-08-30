@@ -54,14 +54,7 @@ export async function POST(request: Request) {
       repositoryUrl: run.repositoryUrl,
       branchName,
       title,
-      body: [
-        `UpgradePilot verified ${run.packageName} from ${run.currentVersion} to ${run.targetVersion}.`,
-        "",
-        "Verification evidence:",
-        ...run.steps
-          .filter((step) => step.status === "passed" && step.command)
-          .map((step) => `- ${step.name}: ${step.command}`)
-      ].join("\n"),
+      body: buildPullRequestBody(run),
       files: run.changedFiles
     });
     const updatedRun = markUpgradeRunPullRequest(run.id, pullRequest) ?? run;
@@ -73,6 +66,41 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+}
+
+type PullRequestBodyRun = NonNullable<ReturnType<typeof getUpgradeRun>>;
+
+function buildPullRequestBody(run: PullRequestBodyRun): string {
+  const verifiedSteps = run.steps
+    .filter((step) => step.status === "passed" && step.command)
+    .map((step) => `- ${step.name}: ${step.command}`);
+
+  return [
+    `UpgradePilot verified ${run.packageName} from ${run.currentVersion} to ${run.targetVersion}.`,
+    "",
+    "## Agent Changes",
+    ...describeAgentChanges(run.changedFiles),
+    "",
+    "## Verification Evidence",
+    ...(verifiedSteps.length > 0 ? verifiedSteps : ["- No command evidence was recorded."]),
+    "",
+    "## Remaining Risk",
+    "- No known remaining risk after successful sandbox verification. Human review is still required before merge."
+  ].join("\n");
+}
+
+function describeAgentChanges(files: Array<{ path: string }>): string[] {
+  return files.map((file) => {
+    if (file.path === "package.json") {
+      return "- `package.json`: updates the requested dependency declaration.";
+    }
+
+    if (file.path === "package-lock.json" || file.path === "pnpm-lock.yaml") {
+      return `- \`${file.path}\`: records the resolved dependency graph for the verified upgrade.`;
+    }
+
+    return `- \`${file.path}\`: applies compatibility changes produced by the repair workflow.`;
+  });
 }
 
 function prBranchName(packageName: string, targetVersion: string): string {
