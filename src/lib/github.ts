@@ -48,6 +48,11 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const metadataCache = new Map<string, { expiresAt: number; value: GitHubRepositoryMetadata }>();
 const fileCache = new Map<string, { expiresAt: number; value: string | null }>();
 
+export function clearGitHubCachesForTests(): void {
+  metadataCache.clear();
+  fileCache.clear();
+}
+
 export type GitHubPullRequestInput = {
   repositoryUrl: string;
   branchName: string;

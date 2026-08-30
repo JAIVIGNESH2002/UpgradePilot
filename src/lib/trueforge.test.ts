@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { clearGitHubCachesForTests } from "@/lib/github";
 import {
   TrueForgeClient,
   TrueForgeIntegrationError,
@@ -10,6 +11,7 @@ import {
 
 describe("TrueForgeClient", () => {
   afterEach(() => {
+    clearGitHubCachesForTests();
     vi.unstubAllEnvs();
   });
 
@@ -162,6 +164,7 @@ describe("TrueForgeClient", () => {
           name: "demo",
           full_name: "acme/demo",
           owner: { login: "acme" },
+          private: false,
           html_url: "https://github.com/acme/demo",
           description: null,
           default_branch: "main",
@@ -430,6 +433,7 @@ describe("TrueForgeClient", () => {
         return Response.json({
           name: "demo",
           owner: { login: "acme" },
+          private: false,
           html_url: "https://github.com/acme/demo",
           description: null,
           default_branch: "main",
@@ -549,6 +553,7 @@ describe("TrueForgeClient", () => {
         return Response.json({
           name: "demo",
           owner: { login: "acme" },
+          private: false,
           html_url: "https://github.com/acme/demo",
           description: null,
           default_branch: "main",
