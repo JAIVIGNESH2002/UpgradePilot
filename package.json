@@ -15,6 +15,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "e2e": "next build && node scripts/run-e2e.mjs",
+    "trueforge:configure": "node scripts/configure-trueforge.mjs",
     "commitlint": "commitlint --edit"
   },
   "dependencies": {
