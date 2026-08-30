@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { runBaselineVerification } from "@/lib/baseline";
+import {
+  interruptedWorkspaceBaseline,
+  workspaceBaselineFromVerificationResult
+} from "@/lib/baseline-response";
 import { inspectPublicNpmRepository } from "@/lib/repository-inspection";
 import { TrueForgeSandboxProvider } from "@/lib/trueforge";
 import type { VerificationPackageManager } from "@/lib/verification";
@@ -21,12 +25,9 @@ export async function POST(request: Request) {
     if (!isSupportedVerificationPackageManager(inspection.package.packageManager.name)) {
       return NextResponse.json(
         {
-          baseline: {
-            status: "interrupted",
-            updatedAt: new Date().toISOString(),
-            commands: 0,
-            message: `${inspection.package.packageManager.name} projects are detected but baseline execution is not supported yet.`
-          }
+          baseline: interruptedWorkspaceBaseline(
+            `${inspection.package.packageManager.name} projects are detected but baseline execution is not supported yet.`
+          )
         },
         { status: 200 }
       );
@@ -40,22 +41,17 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({
-      baseline: {
-        status: result.status === "PASSED" ? "healthy" : "failed",
-        updatedAt: new Date().toISOString(),
-        commands: 1 + result.verification.length,
-        message: null
-      }
+      baseline: workspaceBaselineFromVerificationResult(
+        result,
+        inspection.package.packageManager.name
+      )
     });
   } catch (error) {
     return NextResponse.json(
       {
-        baseline: {
-          status: "interrupted",
-          updatedAt: new Date().toISOString(),
-          commands: 0,
-          message: error instanceof Error ? error.message : "Baseline verification was interrupted."
-        }
+        baseline: interruptedWorkspaceBaseline(
+          error instanceof Error ? error.message : "Baseline verification was interrupted."
+        )
       },
       { status: 200 }
     );

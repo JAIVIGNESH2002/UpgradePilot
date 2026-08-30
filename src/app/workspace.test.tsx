@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RepositoryWorkspace } from "@/app/workspace";
@@ -6,6 +6,7 @@ import type { RepositoryInspection } from "@/lib/package-inspection";
 import {
   REPOSITORY_WORKSPACE_STORAGE_KEY,
   serializeRepositoryWorkspaceSnapshot,
+  type WorkspaceBaselineStep,
   workspaceRepositoryFromInspection
 } from "@/lib/repository-workspace";
 
@@ -16,6 +17,7 @@ describe("RepositoryWorkspace", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -201,11 +203,17 @@ describe("RepositoryWorkspace", () => {
     );
     vi.mocked(fetch).mockResolvedValueOnce(
       Response.json({
-        baseline: {
-          status: "healthy",
-          updatedAt: "2026-08-28T10:00:00Z",
-          commands: 2,
-          message: null
+        run: {
+          id: "run-1",
+          repositoryUrl: "https://github.com/acme/widgets",
+          status: "completed",
+          baseline: {
+            status: "healthy",
+            updatedAt: "2026-08-28T10:00:00Z",
+            commands: 2,
+            message: null,
+            steps: makeBaselineSteps()
+          }
         }
       })
     );
@@ -216,6 +224,10 @@ describe("RepositoryWorkspace", () => {
 
     expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
     expect(screen.getByRole("button", { name: "Re-run baseline" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Baseline details: Healthy" }));
+    expect(screen.getByText("Install dependencies")).toBeVisible();
+    expect(screen.getByText("npm run test")).toBeVisible();
+    expect(screen.getAllByText("Passed")).toHaveLength(2);
   });
 
   it("automatically establishes baseline when preparing Verify Upgrade", async () => {
@@ -232,11 +244,17 @@ describe("RepositoryWorkspace", () => {
     );
     vi.mocked(fetch).mockResolvedValueOnce(
       Response.json({
-        baseline: {
-          status: "healthy",
-          updatedAt: "2026-08-28T10:00:00Z",
-          commands: 2,
-          message: null
+        run: {
+          id: "run-1",
+          repositoryUrl: "https://github.com/acme/widgets",
+          status: "completed",
+          baseline: {
+            status: "healthy",
+            updatedAt: "2026-08-28T10:00:00Z",
+            commands: 2,
+            message: null,
+            steps: makeBaselineSteps()
+          }
         }
       })
     );
@@ -248,12 +266,168 @@ describe("RepositoryWorkspace", () => {
     expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
     expect(screen.getByText("react can open an upgrade run targeting 19.0.0.")).toBeVisible();
     expect(fetch).toHaveBeenCalledWith(
-      "/api/repositories/baseline",
+      "/api/repositories/baseline/runs",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ repositoryUrl: "https://github.com/acme/widgets" })
       })
     );
+  });
+
+  it("polls baseline runs and updates one active step at a time", async () => {
+    vi.useFakeTimers();
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            run: {
+              id: "run-1",
+              repositoryUrl: "https://github.com/acme/widgets",
+              status: "running",
+              baseline: {
+                status: "unknown",
+                updatedAt: null,
+                commands: 0,
+                message: "Baseline verification is running.",
+                steps: [
+                  {
+                    name: "Install dependencies",
+                    command: "npm ci",
+                    status: "running",
+                    durationMs: null,
+                    output: null
+                  },
+                  {
+                    name: "Test",
+                    command: "npm run test",
+                    status: "pending",
+                    durationMs: null,
+                    output: null
+                  }
+                ]
+              }
+            }
+          },
+          { status: 202 }
+        )
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          run: {
+            id: "run-1",
+            repositoryUrl: "https://github.com/acme/widgets",
+            status: "running",
+            baseline: {
+              status: "unknown",
+              updatedAt: null,
+              commands: 0,
+              message: "Baseline verification is running.",
+              steps: [
+                {
+                  name: "Install dependencies",
+                  command: "npm ci",
+                  status: "pending",
+                  durationMs: null,
+                  output: null
+                },
+                {
+                  name: "Test",
+                  command: "npm run test",
+                  status: "running",
+                  durationMs: null,
+                  output: null
+                }
+              ]
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          run: {
+            id: "run-1",
+            repositoryUrl: "https://github.com/acme/widgets",
+            status: "completed",
+            baseline: {
+              status: "healthy",
+              updatedAt: "2026-08-28T10:00:00Z",
+              commands: 2,
+              message: null,
+              steps: makeBaselineSteps()
+            }
+          }
+        })
+      );
+
+    render(<RepositoryWorkspace />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByRole("heading", { name: "widgets" })).toBeVisible();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Run baseline" }));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByText("Baseline: Running")).toBeVisible();
+    expect(screen.getByText("Install dependencies")).toBeVisible();
+    expect(screen.getByText("npm ci")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByText("npm run test")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByText("Baseline: Healthy")).toBeVisible();
+    expect(fetch).toHaveBeenCalledWith("/api/repositories/baseline/runs/status?runId=run-1");
+
+    vi.useRealTimers();
+  });
+
+  it("persists expanded baseline command evidence across reloads", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+
+    render(<RepositoryWorkspace />);
+
+    expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Baseline details: Healthy" }));
+
+    expect(screen.getByText("Install dependencies")).toBeVisible();
+    expect(screen.getByText("npm ci")).toBeVisible();
+    expect(screen.getByText("npm run test")).toBeVisible();
   });
 
   it("refreshes stale persisted repository inspection and latest-version data", async () => {
@@ -417,4 +591,23 @@ function makeDependencyVersions() {
       reason: null
     }
   } as const;
+}
+
+function makeBaselineSteps(): WorkspaceBaselineStep[] {
+  return [
+    {
+      name: "Install dependencies",
+      command: "npm ci",
+      status: "passed",
+      durationMs: 1200,
+      output: "installed"
+    },
+    {
+      name: "Test",
+      command: "npm run test",
+      status: "passed",
+      durationMs: 900,
+      output: "2 passed"
+    }
+  ];
 }

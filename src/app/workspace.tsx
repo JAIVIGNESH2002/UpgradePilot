@@ -1,6 +1,19 @@
 "use client";
 
-import { ArrowUpRight, GitBranch, Loader2, Package, Plus, Search, Trash2 } from "lucide-react";
+import {
+  ArrowUpRight,
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  GitBranch,
+  Loader2,
+  MinusCircle,
+  Package,
+  Plus,
+  Search,
+  Trash2,
+  XCircle
+} from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -20,6 +33,7 @@ import {
   workspaceRepositoryFromInspection,
   type DependencyFilter,
   type WorkspaceDependency,
+  type WorkspaceBaselineStep,
   type WorkspaceRepository
 } from "@/lib/repository-workspace";
 import { cn } from "@/lib/utils";
@@ -28,7 +42,7 @@ type AddRepositoryState =
   { status: "idle" } | { status: "loading" } | { status: "error"; message: string };
 type BaselineActionState =
   | { status: "idle" }
-  | { status: "running"; repositoryId: string }
+  | { status: "running"; repositoryId: string; baseline: WorkspaceRepository["baseline"] }
   | { status: "error"; repositoryId: string; message: string };
 type UpgradePreparationState =
   | { status: "idle" }
@@ -39,6 +53,15 @@ type RepositoryRefreshState =
   | { status: "idle" }
   | { status: "loading"; repositoryId: string }
   | { status: "error"; repositoryId: string; message: string };
+type BaselineRunResponse = {
+  run?: {
+    id: string;
+    repositoryUrl: string;
+    status: "running" | "completed";
+    baseline: WorkspaceRepository["baseline"];
+  };
+  message?: string;
+};
 
 const dependencyFilters: Array<{ value: DependencyFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -250,40 +273,63 @@ export function RepositoryWorkspace() {
   }
 
   async function runBaseline(repository: WorkspaceRepository) {
-    setBaselineActionState({ status: "running", repositoryId: repository.id });
-
     try {
-      const response = await fetch("/api/repositories/baseline", {
+      const startResponse = await fetch("/api/repositories/baseline/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repositoryUrl: repository.repositoryUrl })
       });
-      const body = (await response.json()) as {
-        baseline?: WorkspaceRepository["baseline"];
-        message?: string;
-      };
+      const startedRun = await parseBaselineRunResponse(startResponse);
 
-      if (!response.ok || body.baseline === undefined) {
-        throw new Error(body.message ?? "Baseline verification failed to start.");
+      if (startedRun.status === "completed") {
+        setRepositoryBaseline(repository.id, startedRun.baseline);
+        setBaselineActionState({ status: "idle" });
+        return startedRun.baseline;
       }
 
-      const baseline = body.baseline;
+      setBaselineActionState({
+        status: "running",
+        repositoryId: repository.id,
+        baseline: startedRun.baseline
+      });
 
-      setRepositories((currentRepositories) =>
-        currentRepositories.map((currentRepository) =>
-          currentRepository.id === repository.id
-            ? { ...currentRepository, baseline }
-            : currentRepository
-        )
-      );
+      let currentRun = startedRun;
+
+      while (currentRun.status === "running") {
+        await wait(1000);
+        const statusResponse = await fetch(
+          `/api/repositories/baseline/runs/status?runId=${encodeURIComponent(currentRun.id)}`
+        );
+        currentRun = await parseBaselineRunResponse(statusResponse);
+
+        if (currentRun.status === "running") {
+          setBaselineActionState({
+            status: "running",
+            repositoryId: repository.id,
+            baseline: currentRun.baseline
+          });
+        }
+      }
+
+      setRepositoryBaseline(repository.id, currentRun.baseline);
       setBaselineActionState({ status: "idle" });
-      return baseline;
+      return currentRun.baseline;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Baseline verification failed to start.";
       setBaselineActionState({ status: "error", repositoryId: repository.id, message });
       return null;
     }
+  }
+
+  function setRepositoryBaseline(repositoryId: string, baseline: WorkspaceRepository["baseline"]) {
+    setRepositories((currentRepositories) =>
+      currentRepositories.map((currentRepository) =>
+        currentRepository.id === repositoryId
+          ? { ...currentRepository, baseline }
+          : currentRepository
+      )
+    );
   }
 
   async function prepareVerifyUpgrade(
@@ -311,6 +357,20 @@ export function RepositoryWorkspace() {
       dependencyName: dependency.packageName,
       message: `${dependency.packageName} can open an upgrade run targeting ${dependency.latestVersion}.`
     });
+  }
+
+  async function parseBaselineRunResponse(response: Response) {
+    const body = (await response.json()) as BaselineRunResponse;
+
+    if (!response.ok || body.run === undefined) {
+      throw new Error(body.message ?? "Baseline verification failed to start.");
+    }
+
+    return body.run;
+  }
+
+  async function wait(durationMs: number) {
+    await new Promise((resolve) => window.setTimeout(resolve, durationMs));
   }
 
   return (
@@ -655,16 +715,47 @@ function BaselinePanel({
 }) {
   const isRunning =
     baselineActionState.status === "running" && baselineActionState.repositoryId === repository.id;
+  const runningBaseline = isRunning ? baselineActionState.baseline : null;
   const isUnsupported = repository.package.packageManager.support === "unsupported";
+  const [isExpanded, setIsExpanded] = useState(false);
+  const steps = runningBaseline?.steps ?? repository.baseline.steps;
+  const hasSteps = steps.length > 0;
+  const progressValue = baselineProgressValue(isRunning, runningBaseline ?? repository.baseline);
+
+  useEffect(() => {
+    if (!isRunning) {
+      return;
+    }
+
+    const openTimer = window.setTimeout(() => {
+      setIsExpanded(true);
+    }, 0);
+
+    return () => window.clearTimeout(openTimer);
+  }, [isRunning]);
 
   return (
-    <section className="rounded-md border border-border bg-background px-4 py-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <section className="overflow-hidden rounded-md border border-border bg-background">
+      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <p className="flex items-center gap-2 text-sm font-semibold">
-            <HealthDot status={repository.baseline.status} />
-            Baseline: {statusLabel(repository.baseline.status)}
-          </p>
+          <button
+            type="button"
+            className="flex min-w-0 items-center gap-2 rounded-sm text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            aria-label={`Baseline details: ${isRunning ? "Running" : statusLabel(repository.baseline.status)}`}
+            aria-expanded={isExpanded}
+            aria-controls={`baseline-steps-${repository.id}`}
+            onClick={() => setIsExpanded((currentValue) => !currentValue)}
+          >
+            <ChevronDown
+              className={cn(
+                "size-4 shrink-0 text-muted-foreground transition-transform",
+                isExpanded ? "rotate-0" : "-rotate-90"
+              )}
+              aria-hidden="true"
+            />
+            <HealthDot status={isRunning ? "unknown" : repository.baseline.status} />
+            <span>Baseline: {isRunning ? "Running" : statusLabel(repository.baseline.status)}</span>
+          </button>
           <p className="mt-1 text-sm text-muted-foreground">{baselineDescription(repository)}</p>
           {baselineActionState.status === "error" &&
           baselineActionState.repositoryId === repository.id ? (
@@ -694,8 +785,96 @@ function BaselinePanel({
           {repository.baseline.status === "unknown" ? "Run baseline" : "Re-run baseline"}
         </Button>
       </div>
+      {(isExpanded || isRunning) && (hasSteps || isRunning) ? (
+        <div
+          id={`baseline-steps-${repository.id}`}
+          className="border-t border-border bg-secondary/20"
+        >
+          <div className="h-1 bg-secondary">
+            <div
+              className={cn(
+                "h-full bg-foreground transition-[width] duration-700 ease-out",
+                isRunning ? "motion-safe:animate-pulse" : ""
+              )}
+              style={{ width: `${progressValue}%` }}
+            />
+          </div>
+          <ol className="divide-y divide-border">
+            {steps.map((step) => (
+              <li key={`${step.name}:${step.command}`} className="px-4 py-3">
+                <BaselineStepRow step={step} />
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function BaselineStepRow({ step }: { step: WorkspaceRepository["baseline"]["steps"][number] }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <BaselineStepIcon status={step.status} />
+          <p className="truncate text-sm font-medium">{step.name}</p>
+          <BaselineStepStatus status={step.status} />
+        </div>
+        <p className="mt-1 truncate pl-6 font-mono text-xs text-muted-foreground">{step.command}</p>
+        {step.output ? (
+          <details className="mt-2 pl-6">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+              View output
+            </summary>
+            <pre className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-background p-3 text-xs leading-5 text-muted-foreground">
+              {step.output}
+            </pre>
+          </details>
+        ) : null}
+      </div>
+      {step.durationMs !== null ? (
+        <span className="pl-6 text-xs text-muted-foreground sm:pl-0">
+          {formatDuration(step.durationMs)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function BaselineStepIcon({ status }: { status: WorkspaceBaselineStep["status"] }) {
+  if (status === "running") {
+    return <Loader2 className="size-4 shrink-0 animate-spin text-foreground" aria-hidden="true" />;
+  }
+
+  if (status === "passed") {
+    return <CheckCircle2 className="size-4 shrink-0 text-green-600" aria-hidden="true" />;
+  }
+
+  if (status === "failed") {
+    return <XCircle className="size-4 shrink-0 text-red-600" aria-hidden="true" />;
+  }
+
+  if (status === "skipped") {
+    return <MinusCircle className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />;
+  }
+
+  return <Circle className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />;
+}
+
+function BaselineStepStatus({ status }: { status: WorkspaceBaselineStep["status"] }) {
+  const label =
+    status === "passed"
+      ? "Passed"
+      : status === "failed"
+        ? "Failed"
+        : status === "running"
+          ? "Running"
+          : status === "skipped"
+            ? "Skipped"
+            : "Queued";
+
+  return <span className="text-xs text-muted-foreground">{label}</span>;
 }
 
 function DependencySurface({
@@ -1021,10 +1200,35 @@ function baselineDescription(repository: WorkspaceRepository) {
   }
 
   if (repository.baseline.status === "failed") {
-    return `Baseline failed after ${repository.baseline.commands} commands${updatedAt}.`;
+    return (
+      repository.baseline.message ??
+      `Baseline failed after ${repository.baseline.commands} commands${updatedAt}.`
+    );
   }
 
   return repository.baseline.message ?? `Baseline was interrupted${updatedAt}.`;
+}
+
+function formatDuration(durationMs: number) {
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)}s`;
+}
+
+function baselineProgressValue(isRunning: boolean, baseline: WorkspaceRepository["baseline"]) {
+  if (baseline.steps.length === 0) {
+    return isRunning ? 8 : 0;
+  }
+
+  const settledSteps = baseline.steps.filter(
+    (step) => step.status === "passed" || step.status === "failed" || step.status === "skipped"
+  ).length;
+  const runningStep = baseline.steps.some((step) => step.status === "running") ? 0.65 : 0;
+  const progress = ((settledSteps + runningStep) / baseline.steps.length) * 100;
+
+  return Math.min(Math.max(progress, isRunning ? 8 : 0), isRunning ? 96 : 100);
 }
 
 function upgradePreparationMessage(upgradePreparationState: UpgradePreparationState) {
