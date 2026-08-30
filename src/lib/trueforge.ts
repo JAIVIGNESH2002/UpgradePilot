@@ -812,14 +812,14 @@ export class TrueForgeClient {
     if (turn.state.status === "done") {
       const outputText = trueForgeContentToText(turn.state.output?.content);
 
-      if (outputText.includes(UPGRADEPILOT_BASELINE_RESULT_MARKER)) {
+      if (extractLineDelimitedPayload(outputText, UPGRADEPILOT_BASELINE_RESULT_MARKER) !== null) {
         return outputText;
       }
     }
 
     const eventTexts = await this.listTurnEventTexts(sessionId, turn.id);
-    const markedEventText = eventTexts.find((text) =>
-      text.includes(UPGRADEPILOT_BASELINE_RESULT_MARKER)
+    const markedEventText = eventTexts.find(
+      (text) => extractLineDelimitedPayload(text, UPGRADEPILOT_BASELINE_RESULT_MARKER) !== null
     );
 
     if (markedEventText) {
@@ -1134,12 +1134,9 @@ export function parseBaselineWorkflowResult(
   text: string,
   context?: { command?: string; exitCode?: number }
 ): TrueForgeBaselineWorkflowResult {
-  const wrapperPayload = parseResultTextWrapper(text);
-  const markerPattern = new RegExp(
-    `${UPGRADEPILOT_BASELINE_RESULT_MARKER}_START\\s*([\\s\\S]*?)\\s*${UPGRADEPILOT_BASELINE_RESULT_MARKER}_END`
-  );
-  const markerMatch = markerPattern.exec(text);
-  const rawPayload = wrapperPayload ?? (markerMatch ? markerMatch[1] : null);
+  const wrapperPayload = parseResultTextWrapper(text, UPGRADEPILOT_BASELINE_RESULT_MARKER);
+  const rawPayload =
+    wrapperPayload ?? extractLineDelimitedPayload(text, UPGRADEPILOT_BASELINE_RESULT_MARKER);
 
   if (!rawPayload) {
     throw new TrueForgeIntegrationError(describeMissingBaselineMarkers(text, context));
@@ -1165,10 +1162,7 @@ export function parseUpgradeWorkflowResult(
   text: string,
   context?: { command?: string; exitCode?: number }
 ): TrueForgeUpgradeWorkflowResult {
-  const markerPattern = new RegExp(
-    `${UPGRADEPILOT_UPGRADE_RESULT_MARKER}_START\\s*([\\s\\S]*?)\\s*${UPGRADEPILOT_UPGRADE_RESULT_MARKER}_END`
-  );
-  const rawPayload = markerPattern.exec(text)?.[1] ?? null;
+  const rawPayload = extractLineDelimitedPayload(text, UPGRADEPILOT_UPGRADE_RESULT_MARKER);
 
   if (!rawPayload) {
     throw new TrueForgeIntegrationError(
@@ -1732,22 +1726,40 @@ function isRateLimitError(error: unknown): boolean {
   return /429|rate.?limit|quota|resource_exhausted/i.test(message);
 }
 
-function parseResultTextWrapper(text: string): string | null {
+function parseResultTextWrapper(text: string, marker: string): string | null {
   try {
     const parsed = JSON.parse(text) as { resultText?: unknown };
 
-    return typeof parsed.resultText === "string" ? parseMarkerPayload(parsed.resultText) : null;
+    return typeof parsed.resultText === "string"
+      ? extractLineDelimitedPayload(parsed.resultText, marker)
+      : null;
   } catch {
     return null;
   }
 }
 
-function parseMarkerPayload(text: string): string | null {
-  const markerPattern = new RegExp(
-    `${UPGRADEPILOT_BASELINE_RESULT_MARKER}_START\\s*([\\s\\S]*?)\\s*${UPGRADEPILOT_BASELINE_RESULT_MARKER}_END`
+function extractLineDelimitedPayload(text: string, marker: string): string | null {
+  const startMarker = `${marker}_START`;
+  const endMarker = `${marker}_END`;
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const startIndex = lines.findIndex((line) => line.trim() === startMarker);
+
+  if (startIndex === -1) {
+    return null;
+  }
+
+  const endIndex = lines.findIndex(
+    (line, index) => index > startIndex && line.trim() === endMarker
   );
 
-  return markerPattern.exec(text)?.[1] ?? null;
+  if (endIndex === -1) {
+    return null;
+  }
+
+  return lines
+    .slice(startIndex + 1, endIndex)
+    .join("\n")
+    .trim();
 }
 
 function normalizeCommandResult(command: CommandResult): CommandResult {

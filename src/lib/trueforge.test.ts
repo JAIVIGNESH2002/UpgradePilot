@@ -1182,6 +1182,51 @@ describe("TrueForgeSandboxProvider", () => {
     expect(result.upgrade?.modelRepairRequired).toBe(true);
   });
 
+  it("ignores baseline marker-like text inside command output", () => {
+    const result = parseBaselineWorkflowResult(
+      [
+        "UPGRADEPILOT_BASELINE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "FAILED",
+          commands: [
+            {
+              command: "npm test",
+              exitCode: 1,
+              durationMs: 10,
+              output: "test printed UPGRADEPILOT_BASELINE_RESULT_END before failing"
+            }
+          ]
+        }),
+        "UPGRADEPILOT_BASELINE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.commands[0]?.output).toContain("UPGRADEPILOT_BASELINE_RESULT_END");
+  });
+
+  it("ignores upgrade marker-like text inside command output", () => {
+    const result = parseUpgradeWorkflowResult(
+      [
+        "UPGRADEPILOT_UPGRADE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "FAILED",
+          upgradeStatus: "FAILED",
+          commands: [
+            {
+              command: "npm run build",
+              exitCode: 1,
+              durationMs: 10,
+              output: "build printed UPGRADEPILOT_UPGRADE_RESULT_END before failing"
+            }
+          ]
+        }),
+        "UPGRADEPILOT_UPGRADE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.commands[0]?.output).toContain("UPGRADEPILOT_UPGRADE_RESULT_END");
+  });
+
   it("accepts blocked deterministic workflow results", () => {
     const result = parseBaselineWorkflowResult(
       [
