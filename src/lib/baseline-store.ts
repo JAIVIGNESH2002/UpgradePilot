@@ -22,3 +22,7 @@ export function getBaselineRun(repositoryUrl: string): BaselineRunState {
 export function setBaselineRun(repositoryUrl: string, state: BaselineRunState) {
   baselineRuns.set(repositoryUrl, state);
 }
+
+export function clearBaselineRunsForTests() {
+  baselineRuns.clear();
+}

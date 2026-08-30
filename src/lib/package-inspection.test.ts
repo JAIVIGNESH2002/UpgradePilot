@@ -173,4 +173,29 @@ describe("inspectPackageFiles", () => {
       })
     ).toThrow("Could not parse package.json");
   });
+
+  it("caps dependency and script inventory sizes", () => {
+    const dependencies = Object.fromEntries(
+      Array.from({ length: 520 }, (_, index) => [`pkg-${index}`, "1.0.0"])
+    );
+    const scripts = Object.fromEntries(
+      Array.from({ length: 120 }, (_, index) => [`script-${index}`, "echo ok"])
+    );
+    const inspection = inspectPackageFiles({
+      packageJsonText: JSON.stringify({ dependencies, scripts }),
+      packageLockText: null
+    });
+
+    expect(inspection.dependencies).toHaveLength(500);
+    expect(Object.keys(inspection.scripts)).toHaveLength(100);
+  });
+
+  it("rejects oversized package fields", () => {
+    expect(() =>
+      inspectPackageFiles({
+        packageJsonText: JSON.stringify({ name: "x".repeat(501) }),
+        packageLockText: null
+      })
+    ).toThrow("package name is too large");
+  });
 });

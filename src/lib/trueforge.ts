@@ -150,6 +150,7 @@ type TrueForgeUpgradeWorkflowResult = {
 const UPGRADEPILOT_UPGRADE_RESULT_MARKER = "UPGRADEPILOT_UPGRADE_RESULT";
 const DEFAULT_REPAIR_TURN_INTERVAL_MS = 15_000;
 const DEFAULT_REPAIR_BACKOFF_MS = 20_000;
+const DEFAULT_TRUEFORGE_REQUEST_TIMEOUT_MS = 15_000;
 
 export class TrueForgeIntegrationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -783,26 +784,37 @@ export class TrueForgeClient {
 
   private async fetchTrueForge(path: string, init: RequestInit): Promise<Response> {
     const primaryUrl = this.url(path);
+    const timeoutMs = readPositiveIntegerEnv(
+      "TRUEFORGE_REQUEST_TIMEOUT_MS",
+      DEFAULT_TRUEFORGE_REQUEST_TIMEOUT_MS
+    );
+    const primaryRequest = withAbortDeadline(init, timeoutMs);
 
     try {
-      return await this.fetchImpl(primaryUrl, init);
+      return await this.fetchImpl(primaryUrl, primaryRequest.init);
     } catch (error) {
       const fallbackUrl = localhostFallbackUrl(primaryUrl);
 
       if (fallbackUrl !== null) {
+        const fallbackRequest = withAbortDeadline(init, timeoutMs);
+
         try {
-          return await this.fetchImpl(fallbackUrl, init);
+          return await this.fetchImpl(fallbackUrl, fallbackRequest.init);
         } catch (fallbackError) {
           throw new TrueForgeIntegrationError(
             describeTrueForgeNetworkFailure(fallbackError, this.baseUrl),
             { cause: fallbackError }
           );
+        } finally {
+          fallbackRequest.cancel();
         }
       }
 
       throw new TrueForgeIntegrationError(describeTrueForgeNetworkFailure(error, this.baseUrl), {
         cause: error
       });
+    } finally {
+      primaryRequest.cancel();
     }
   }
 
@@ -887,6 +899,28 @@ function localhostFallbackUrl(input: string): string | null {
   url.hostname = "127.0.0.1";
 
   return url.toString();
+}
+
+function withAbortDeadline(
+  init: RequestInit,
+  timeoutMs: number
+): { init: RequestInit; cancel: () => void } {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = init.signal;
+
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+
+  return {
+    init: { ...init, signal: controller.signal },
+    cancel: () => clearTimeout(timeout)
+  };
 }
 
 function describeTrueForgeNetworkFailure(error: unknown, baseUrl: string): string {

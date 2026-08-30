@@ -60,6 +60,11 @@ type PackageLockShape = {
   packages?: unknown;
 };
 
+const MAX_DEPENDENCIES = 500;
+const MAX_SCRIPTS = 100;
+const MAX_FIELD_LENGTH = 500;
+const MAX_SCRIPT_LENGTH = 2_000;
+
 export class PackageInspectionError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -98,9 +103,12 @@ export function inspectPackageFiles({
       : extractPnpmResolvedVersions(pnpmLockText);
 
   return {
-    packageName: typeof packageJson.name === "string" ? packageJson.name : null,
+    packageName:
+      typeof packageJson.name === "string" ? limitField(packageJson.name, "package name") : null,
     nodeRequirement:
-      typeof packageJson.engines?.node === "string" ? packageJson.engines.node : null,
+      typeof packageJson.engines?.node === "string"
+        ? limitField(packageJson.engines.node, "node requirement")
+        : null,
     packageManager,
     hasPackageLock: packageLock !== null,
     lockfileVersion:
@@ -132,9 +140,10 @@ function extractDependencyItems(
 
   return Object.entries(input)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .slice(0, MAX_DEPENDENCIES)
     .map(([packageName, currentVersion]) => ({
-      packageName,
-      currentVersion,
+      packageName: limitField(packageName, "dependency name"),
+      currentVersion: limitField(currentVersion, "dependency version"),
       resolvedVersion: resolvedVersions.get(packageName) ?? null,
       kind
     }))
@@ -146,13 +155,27 @@ function extractScripts(input: unknown): Record<string, string> {
     return {};
   }
 
-  return Object.entries(input).reduce<Record<string, string>>((scripts, [name, command]) => {
-    if (typeof command === "string") {
-      scripts[name] = command;
-    }
+  return Object.entries(input)
+    .slice(0, MAX_SCRIPTS)
+    .reduce<Record<string, string>>((scripts, [name, command]) => {
+      if (typeof command === "string") {
+        scripts[limitField(name, "script name")] = limitField(
+          command,
+          "script command",
+          MAX_SCRIPT_LENGTH
+        );
+      }
 
-    return scripts;
-  }, {});
+      return scripts;
+    }, {});
+}
+
+function limitField(input: string, label: string, maxLength = MAX_FIELD_LENGTH): string {
+  if (input.length > maxLength) {
+    throw new PackageInspectionError(`${label} is too large to inspect safely.`);
+  }
+
+  return input;
 }
 
 function isStringRecord(input: unknown): input is Record<string, unknown> {
