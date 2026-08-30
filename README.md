@@ -8,7 +8,7 @@ It does more than identify outdated packages. UpgradePilot establishes a real ba
 
 Qodo is used as an independent review layer for UpgradePilot pull requests.
 
-Status: placeholder for hackathon evidence. After the demo recording, this section will be updated with representative Qodo-reviewed PRs, screenshots, and a short before/after summary of findings that improved the project.
+Status: placeholder for review evidence. This section will be updated with representative Qodo-reviewed PRs, screenshots, and a short before/after summary of findings that improved the project.
 
 Representative merged PR:
 
@@ -63,7 +63,7 @@ Current TrueForge usage:
 
 ```mermaid
 flowchart TD
-  User[Developer or judge] --> UI[UpgradePilot workspace UI]
+  User[Developer] --> UI[UpgradePilot workspace UI]
   UI --> API[Next.js server routes]
 
   API --> GitHub[GitHub API]
@@ -104,7 +104,7 @@ flowchart TD
 - Daytona as the configured sandbox provider
 - Qodo for independent pull request review
 
-## Demo And Judge Setup
+## Running The Project
 
 There are two practical ways to run the project.
 
@@ -157,7 +157,7 @@ node --env-file=.env.local scripts/configure-trueforge.mjs
 
 ## Docker Compose
 
-Docker Compose is the easiest way to share UpgradePilot with judges or teammates.
+Docker Compose is the easiest way to share UpgradePilot with other developers.
 
 The TrueForge repository used for this project is a regular local clone with local patches. It is not vendored into UpgradePilot. Build and publish that patched TrueForge image first, then UpgradePilot Compose can pull it.
 

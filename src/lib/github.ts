@@ -169,25 +169,33 @@ export class GitHubClient {
     );
 
     for (const file of input.files) {
-      const existingFile = await this.requestJson<GitHubContentResponse>(
-        `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
-          ref.name
-        )}/contents/${encodeRepositoryPath(file.path)}?ref=${encodeURIComponent(
-          metadata.defaultBranch
-        )}`
-      );
+      const existingFile = await this.getRepositoryContent(file.path, {
+        owner: ref.owner,
+        name: ref.name,
+        branch: metadata.defaultBranch
+      });
+      const body: {
+        message: string;
+        content: string;
+        branch: string;
+        sha?: string;
+      } = {
+        message: `chore: verify ${input.title}`,
+        content: Buffer.from(file.content, "utf8").toString("base64"),
+        branch: input.branchName
+      };
+
+      if (existingFile !== null) {
+        body.sha = existingFile.sha;
+      }
+
       await this.requestJson(
         `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
           ref.name
         )}/contents/${encodeRepositoryPath(file.path)}`,
         {
           method: "PUT",
-          body: JSON.stringify({
-            message: `chore: verify ${input.title}`,
-            content: Buffer.from(file.content, "utf8").toString("base64"),
-            branch: input.branchName,
-            sha: existingFile.sha
-          })
+          body: JSON.stringify(body)
         }
       );
     }
@@ -212,6 +220,33 @@ export class GitHubClient {
       number: pullRequest.number,
       branchName: input.branchName
     };
+  }
+
+  private async getRepositoryContent(
+    path: string,
+    input: { owner: string; name: string; branch: string }
+  ): Promise<GitHubContentResponse | null> {
+    const response = await this.fetchGitHub(
+      `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(
+        input.name
+      )}/contents/${encodeRepositoryPath(path)}?ref=${encodeURIComponent(input.branch)}`,
+      {
+        headers: this.headers({ accept: "application/vnd.github+json" }),
+        cache: "no-store"
+      }
+    );
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    if (!response.ok) {
+      throw new GitHubRepositoryError(
+        `GitHub returned ${response.status} while fetching ${path}.`
+      );
+    }
+
+    return response.json() as Promise<GitHubContentResponse>;
   }
 
   async getRepositoryFileText(
