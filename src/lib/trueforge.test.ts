@@ -853,6 +853,81 @@ describe("TrueForgeSandboxProvider", () => {
     });
   });
 
+  it("accepts a completed baseline turn that returns the requested resultText wrapper", async () => {
+    const wrappedResultText = [
+      "UPGRADEPILOT_BASELINE_RESULT_START",
+      JSON.stringify({
+        overallStatus: "PASSED",
+        commands: [
+          { command: "npm ci", exitCode: 0, durationMs: 10, output: "installed" },
+          { command: "npm run test", exitCode: 0, durationMs: 12, output: "ok" }
+        ]
+      }),
+      "UPGRADEPILOT_BASELINE_RESULT_END"
+    ].join("\n");
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+
+      if (href.endsWith("/healthz")) {
+        return Response.json({ status: "ok", version: "0.2.0-rc.0" });
+      }
+
+      if (href.endsWith("/api/v1/settings/sandbox-providers")) {
+        return Response.json({
+          data: {
+            manifest: { type: "daytona" },
+            status: "ready",
+            status_reason: null
+          }
+        });
+      }
+
+      if (href.endsWith("/api/v1/models")) {
+        return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
+      }
+
+      if (href.endsWith("/api/v1/sessions") && method === "POST") {
+        return Response.json({ data: { id: "session-1" } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns") && method === "POST") {
+        return Response.json({ data: { id: "turn-1", state: { status: "running" } } });
+      }
+
+      if (href.endsWith("/api/v1/sessions/session-1/turns/turn-1")) {
+        return Response.json({
+          data: {
+            id: "turn-1",
+            state: {
+              status: "done",
+              output: { content: JSON.stringify({ resultText: wrappedResultText }) },
+              required_actions: []
+            }
+          }
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    });
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(
+      client.runNpmBaselineWorkflow({
+        repositoryUrl: "https://github.com/acme/demo",
+        scripts: { test: "vitest run" },
+        packageManager: "npm"
+      })
+    ).resolves.toMatchObject({
+      status: "PASSED",
+      install: { command: "npm ci", exitCode: 0 },
+      verification: [{ command: "npm run test", exitCode: 0 }]
+    });
+  });
+
   it("treats failed deterministic sandbox cleanup as an infrastructure error", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
@@ -1180,6 +1255,51 @@ describe("TrueForgeSandboxProvider", () => {
 
     expect(result.upgradeStatus).toBe("FAILED");
     expect(result.upgrade?.modelRepairRequired).toBe(true);
+  });
+
+  it("ignores baseline marker-like text inside command output", () => {
+    const result = parseBaselineWorkflowResult(
+      [
+        "UPGRADEPILOT_BASELINE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "FAILED",
+          commands: [
+            {
+              command: "npm test",
+              exitCode: 1,
+              durationMs: 10,
+              output: "test printed UPGRADEPILOT_BASELINE_RESULT_END before failing"
+            }
+          ]
+        }),
+        "UPGRADEPILOT_BASELINE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.commands[0]?.output).toContain("UPGRADEPILOT_BASELINE_RESULT_END");
+  });
+
+  it("ignores upgrade marker-like text inside command output", () => {
+    const result = parseUpgradeWorkflowResult(
+      [
+        "UPGRADEPILOT_UPGRADE_RESULT_START",
+        JSON.stringify({
+          overallStatus: "FAILED",
+          upgradeStatus: "FAILED",
+          commands: [
+            {
+              command: "npm run build",
+              exitCode: 1,
+              durationMs: 10,
+              output: "build printed UPGRADEPILOT_UPGRADE_RESULT_END before failing"
+            }
+          ]
+        }),
+        "UPGRADEPILOT_UPGRADE_RESULT_END"
+      ].join("\n")
+    );
+
+    expect(result.commands[0]?.output).toContain("UPGRADEPILOT_UPGRADE_RESULT_END");
   });
 
   it("accepts blocked deterministic workflow results", () => {
