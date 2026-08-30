@@ -5,6 +5,7 @@ import type { WorkspaceBaseline } from "@/lib/repository-workspace";
 
 describe("upgrade-run-store", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.useRealTimers();
     clearUpgradeRunsForTests();
   });
@@ -27,6 +28,141 @@ describe("upgrade-run-store", () => {
       status: "failed",
       output: "npm test failed"
     });
+  });
+
+  it("evicts completed upgrade runs after the configured retention window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_RUN_RETENTION_MS", "1000");
+    const run = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      changeType: "minor",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    expect(getUpgradeRun(run.id)).not.toBeNull();
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getUpgradeRun(run.id)).toBeNull();
+  });
+
+  it("evicts oldest completed upgrade runs when the size limit is reached", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_MAX_RUNS", "1");
+    const first = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      changeType: "minor",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01Z"));
+
+    const second = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "zod",
+      currentVersion: "3.25.0",
+      targetVersion: "4.4.3",
+      changeType: "major",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    expect(getUpgradeRun(first.id)).toBeNull();
+    expect(getUpgradeRun(second.id)).not.toBeNull();
+  });
+
+  it("marks stale running upgrade runs as interrupted", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_RUNNING_RUN_TIMEOUT_MS", "1000");
+    const run = startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "left-pad",
+        currentVersion: "1.3.0",
+        targetVersion: "1.3.1",
+        changeType: "minor",
+        baseline: healthyBaseline,
+        packageManager: "npm"
+      },
+      { runVerification: vi.fn(() => new Promise<never>(() => undefined)) }
+    );
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getUpgradeRun(run.id)).toMatchObject({
+      status: "completed",
+      outcome: "interrupted",
+      message: "Upgrade verification was interrupted after the run stopped reporting progress."
+    });
+  });
+
+  it("rejects new upgrade runs when the active run limit is reached", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_MAX_ACTIVE_RUNS", "1");
+    startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "left-pad",
+        currentVersion: "1.3.0",
+        targetVersion: "1.3.1",
+        changeType: "minor",
+        baseline: healthyBaseline,
+        packageManager: "npm"
+      },
+      { runVerification: vi.fn(() => new Promise<never>(() => undefined)) }
+    );
+    const secondVerification = vi.fn(async () => successfulUpgrade());
+
+    const second = startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "zod",
+        currentVersion: "3.25.0",
+        targetVersion: "4.4.3",
+        changeType: "major",
+        baseline: healthyBaseline,
+        packageManager: "npm"
+      },
+      { runVerification: secondVerification }
+    );
+
+    expect(second).toMatchObject({
+      status: "completed",
+      outcome: "interrupted",
+      message: "Too many upgrade runs are active. Retry after existing runs finish."
+    });
+    expect(secondVerification).not.toHaveBeenCalled();
+  });
+
+  it("ignores invalid numeric-prefix retention values", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_RUN_RETENTION_MS", "1000oops");
+    const run = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      changeType: "minor",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getUpgradeRun(run.id)).not.toBeNull();
   });
 
   it("keeps deterministic upgrade workflow steps on known backend state without model calls", async () => {

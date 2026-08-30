@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { WorkspaceBaseline, WorkspaceBaselineStepStatus } from "@/lib/repository-workspace";
+import { readPositiveIntegerEnv } from "@/lib/run-store-retention";
 import { TrueForgeSandboxProvider } from "@/lib/trueforge";
 import type { CommandResult, VerificationPackageManager } from "@/lib/verification";
 
@@ -68,6 +69,7 @@ export type UpgradeRepairHandoffResult = {
 
 type UpgradeRunRecord = UpgradeRunSnapshot & {
   startedAtMs?: number;
+  updatedAtMs: number;
 };
 
 type StartUpgradeRunInput = {
@@ -98,6 +100,10 @@ type StartUpgradeRunOptions = {
 };
 
 const upgradeRuns = new Map<string, UpgradeRunRecord>();
+const DEFAULT_RUN_RETENTION_MS = 60 * 60 * 1000;
+const DEFAULT_MAX_RUNS = 100;
+const DEFAULT_RUNNING_RUN_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_MAX_ACTIVE_RUNS = 25;
 
 export function startUpgradeRun(
   input: StartUpgradeRunInput,
@@ -119,6 +125,25 @@ export function startUpgradeRun(
       packageManager: input.packageManager,
       outcome: "interrupted",
       message: "Upgrade run is missing required repository or dependency version information.",
+      steps: []
+    });
+  }
+
+  pruneUpgradeRuns();
+
+  if (
+    activeUpgradeRunCount() >=
+    readPositiveIntegerEnv("UPGRADEPILOT_MAX_ACTIVE_RUNS", DEFAULT_MAX_ACTIVE_RUNS)
+  ) {
+    return completedRun({
+      id: runId,
+      repositoryUrl,
+      packageName,
+      currentVersion,
+      targetVersion,
+      packageManager: input.packageManager,
+      outcome: "interrupted",
+      message: "Too many upgrade runs are active. Retry after existing runs finish.",
       steps: []
     });
   }
@@ -168,10 +193,11 @@ export function startUpgradeRun(
     startedAt: new Date().toISOString(),
     updatedAt: null,
     changedFiles: [],
-    pullRequest: null
+    pullRequest: null,
+    updatedAtMs: Date.now()
   };
 
-  upgradeRuns.set(runId, record);
+  setUpgradeRunRecord(record);
 
   void completeUpgradeRun({
     runId: record.id,
@@ -196,6 +222,7 @@ export function startUpgradeRun(
 }
 
 export function getUpgradeRun(runId: string): UpgradeRunSnapshot | null {
+  pruneUpgradeRuns();
   const record = upgradeRuns.get(runId);
 
   return record ? snapshotUpgradeRun(record) : null;
@@ -217,7 +244,8 @@ export function markUpgradeRunPullRequest(
 
   record.pullRequest = pullRequest;
   record.updatedAt = new Date().toISOString();
-  upgradeRuns.set(runId, record);
+  record.updatedAtMs = Date.now();
+  setUpgradeRunRecord(record);
 
   return snapshotUpgradeRun(record);
 }
@@ -312,7 +340,8 @@ async function completeUpgradeRun({
     record.steps = interruptedUpgradeSteps(record.steps, record.message);
   } finally {
     record.updatedAt = new Date().toISOString();
-    upgradeRuns.set(runId, record);
+    record.updatedAtMs = Date.now();
+    setUpgradeRunRecord(record);
   }
 }
 
@@ -358,7 +387,7 @@ function completedRun({
   steps: UpgradeRunStep[];
 }): UpgradeRunSnapshot {
   const now = new Date().toISOString();
-  const snapshot: UpgradeRunSnapshot = {
+  const snapshot: UpgradeRunRecord = {
     id,
     repositoryUrl,
     packageName,
@@ -372,12 +401,65 @@ function completedRun({
     startedAt: now,
     updatedAt: now,
     changedFiles: [],
-    pullRequest: null
+    pullRequest: null,
+    updatedAtMs: Date.now()
   };
 
-  upgradeRuns.set(id, snapshot);
+  setUpgradeRunRecord(snapshot);
 
   return snapshot;
+}
+
+function setUpgradeRunRecord(record: UpgradeRunRecord) {
+  upgradeRuns.set(record.id, record);
+  pruneUpgradeRuns();
+}
+
+function pruneUpgradeRuns() {
+  const now = Date.now();
+  const retentionMs = readPositiveIntegerEnv(
+    "UPGRADEPILOT_RUN_RETENTION_MS",
+    DEFAULT_RUN_RETENTION_MS
+  );
+  const maxRuns = readPositiveIntegerEnv("UPGRADEPILOT_MAX_RUNS", DEFAULT_MAX_RUNS);
+  const runningTimeoutMs = readPositiveIntegerEnv(
+    "UPGRADEPILOT_RUNNING_RUN_TIMEOUT_MS",
+    DEFAULT_RUNNING_RUN_TIMEOUT_MS
+  );
+
+  for (const [runId, record] of upgradeRuns) {
+    if (record.status === "running" && now - record.updatedAtMs > runningTimeoutMs) {
+      record.status = "completed";
+      record.outcome = "interrupted";
+      record.message =
+        "Upgrade verification was interrupted after the run stopped reporting progress.";
+      record.steps = interruptedUpgradeSteps(record.steps, record.message);
+      record.updatedAt = new Date(now).toISOString();
+      record.updatedAtMs = now;
+      upgradeRuns.set(runId, record);
+      continue;
+    }
+
+    if (record.status === "completed" && now - record.updatedAtMs > retentionMs) {
+      upgradeRuns.delete(runId);
+    }
+  }
+
+  const completedRuns = [...upgradeRuns.values()]
+    .filter((record) => record.status === "completed")
+    .sort((left, right) => left.updatedAtMs - right.updatedAtMs);
+
+  while (upgradeRuns.size > maxRuns && completedRuns.length > 0) {
+    const oldest = completedRuns.shift();
+
+    if (oldest) {
+      upgradeRuns.delete(oldest.id);
+    }
+  }
+}
+
+function activeUpgradeRunCount(): number {
+  return [...upgradeRuns.values()].filter((record) => record.status === "running").length;
 }
 
 function plannedUpgradeSteps({

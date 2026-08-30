@@ -17,6 +17,7 @@ describe("baseline run store", () => {
 
   afterEach(() => {
     clearBaselineRunsForTests();
+    vi.unstubAllEnvs();
     vi.useRealTimers();
   });
 
@@ -73,9 +74,89 @@ describe("baseline run store", () => {
       }
     });
   });
+
+  it("evicts completed baseline runs after the configured retention window", async () => {
+    vi.stubEnv("UPGRADEPILOT_RUN_RETENTION_MS", "1000");
+    const started = await startBaselineRun("https://github.com/acme/widgets", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection({ packageManager: "yarn" }))
+    });
+
+    expect(getBaselineRun(started.id)).not.toBeNull();
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getBaselineRun(started.id)).toBeNull();
+  });
+
+  it("evicts oldest completed baseline runs when the size limit is reached", async () => {
+    vi.stubEnv("UPGRADEPILOT_MAX_RUNS", "1");
+    const first = await startBaselineRun("https://github.com/acme/first", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection({ packageManager: "yarn" }))
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01Z"));
+
+    const second = await startBaselineRun("https://github.com/acme/second", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection({ packageManager: "yarn" }))
+    });
+
+    expect(getBaselineRun(first.id)).toBeNull();
+    expect(getBaselineRun(second.id)).not.toBeNull();
+  });
+
+  it("marks stale running baseline runs as interrupted", async () => {
+    vi.stubEnv("UPGRADEPILOT_RUNNING_RUN_TIMEOUT_MS", "1000");
+    const started = await startBaselineRun("https://github.com/acme/widgets", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection()),
+      runVerification: vi.fn(() => new Promise<never>(() => undefined))
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getBaselineRun(started.id)).toMatchObject({
+      status: "completed",
+      baseline: {
+        status: "interrupted",
+        message: "Baseline verification was interrupted after the run stopped reporting progress."
+      }
+    });
+  });
+
+  it("rejects new baseline runs when the active run limit is reached", async () => {
+    vi.stubEnv("UPGRADEPILOT_MAX_ACTIVE_RUNS", "1");
+    await startBaselineRun("https://github.com/acme/first", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection()),
+      runVerification: vi.fn(() => new Promise<never>(() => undefined))
+    });
+    const secondInspect = vi.fn(async () => makeRepositoryInspection());
+
+    const second = await startBaselineRun("https://github.com/acme/second", {
+      inspectRepository: secondInspect
+    });
+
+    expect(second.status).toBe("completed");
+    expect(second.baseline).toMatchObject({
+      status: "interrupted",
+      message: "Too many baseline runs are active. Retry after existing runs finish."
+    });
+    expect(secondInspect).not.toHaveBeenCalled();
+  });
+
+  it("ignores invalid numeric-prefix retention values", async () => {
+    vi.stubEnv("UPGRADEPILOT_RUN_RETENTION_MS", "1000oops");
+    const started = await startBaselineRun("https://github.com/acme/widgets", {
+      inspectRepository: vi.fn(async () => makeRepositoryInspection({ packageManager: "yarn" }))
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getBaselineRun(started.id)).not.toBeNull();
+  });
 });
 
-function makeRepositoryInspection(): RepositoryInspection {
+function makeRepositoryInspection({
+  packageManager = "npm"
+}: { packageManager?: "npm" | "yarn" } = {}): RepositoryInspection {
   return {
     metadata: {
       owner: "acme",
@@ -90,11 +171,14 @@ function makeRepositoryInspection(): RepositoryInspection {
       packageName: "widgets",
       nodeRequirement: ">=22",
       packageManager: {
-        name: "npm",
-        declared: "npm@10.0.0",
-        lockfile: { type: "npm", path: "package-lock.json", version: 3 },
-        support: "supported",
-        installCommand: "npm ci"
+        name: packageManager,
+        declared: `${packageManager}@10.0.0`,
+        lockfile:
+          packageManager === "npm"
+            ? { type: "npm", path: "package-lock.json", version: 3 }
+            : { type: "yarn", path: "yarn.lock", version: null },
+        support: packageManager === "npm" ? "supported" : "unsupported",
+        installCommand: packageManager === "npm" ? "npm ci" : null
       },
       hasPackageLock: true,
       lockfileVersion: 3,
