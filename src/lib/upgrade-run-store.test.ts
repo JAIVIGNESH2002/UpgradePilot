@@ -5,6 +5,7 @@ import type { WorkspaceBaseline } from "@/lib/repository-workspace";
 
 describe("upgrade-run-store", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.useRealTimers();
     clearUpgradeRunsForTests();
   });
@@ -27,6 +28,57 @@ describe("upgrade-run-store", () => {
       status: "failed",
       output: "npm test failed"
     });
+  });
+
+  it("evicts completed upgrade runs after the configured retention window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_RUN_RETENTION_MS", "1000");
+    const run = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      changeType: "minor",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    expect(getUpgradeRun(run.id)).not.toBeNull();
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01.001Z"));
+
+    expect(getUpgradeRun(run.id)).toBeNull();
+  });
+
+  it("evicts oldest completed upgrade runs when the size limit is reached", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
+    vi.stubEnv("UPGRADEPILOT_MAX_RUNS", "1");
+    const first = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "react",
+      currentVersion: "18.3.1",
+      targetVersion: "19.0.0",
+      changeType: "minor",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    vi.setSystemTime(new Date("2026-08-28T10:00:01Z"));
+
+    const second = startUpgradeRun({
+      repositoryUrl: "https://github.com/acme/widgets",
+      packageName: "zod",
+      currentVersion: "3.25.0",
+      targetVersion: "4.4.3",
+      changeType: "major",
+      baseline: { ...healthyBaseline, status: "failed", message: "npm test failed" },
+      packageManager: "npm"
+    });
+
+    expect(getUpgradeRun(first.id)).toBeNull();
+    expect(getUpgradeRun(second.id)).not.toBeNull();
   });
 
   it("keeps deterministic upgrade workflow steps on known backend state without model calls", async () => {

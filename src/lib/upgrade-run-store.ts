@@ -68,6 +68,7 @@ export type UpgradeRepairHandoffResult = {
 
 type UpgradeRunRecord = UpgradeRunSnapshot & {
   startedAtMs?: number;
+  updatedAtMs: number;
 };
 
 type StartUpgradeRunInput = {
@@ -98,6 +99,8 @@ type StartUpgradeRunOptions = {
 };
 
 const upgradeRuns = new Map<string, UpgradeRunRecord>();
+const DEFAULT_RUN_RETENTION_MS = 60 * 60 * 1000;
+const DEFAULT_MAX_RUNS = 100;
 
 export function startUpgradeRun(
   input: StartUpgradeRunInput,
@@ -168,10 +171,11 @@ export function startUpgradeRun(
     startedAt: new Date().toISOString(),
     updatedAt: null,
     changedFiles: [],
-    pullRequest: null
+    pullRequest: null,
+    updatedAtMs: Date.now()
   };
 
-  upgradeRuns.set(runId, record);
+  setUpgradeRunRecord(record);
 
   void completeUpgradeRun({
     runId: record.id,
@@ -196,6 +200,7 @@ export function startUpgradeRun(
 }
 
 export function getUpgradeRun(runId: string): UpgradeRunSnapshot | null {
+  pruneUpgradeRuns();
   const record = upgradeRuns.get(runId);
 
   return record ? snapshotUpgradeRun(record) : null;
@@ -217,7 +222,8 @@ export function markUpgradeRunPullRequest(
 
   record.pullRequest = pullRequest;
   record.updatedAt = new Date().toISOString();
-  upgradeRuns.set(runId, record);
+  record.updatedAtMs = Date.now();
+  setUpgradeRunRecord(record);
 
   return snapshotUpgradeRun(record);
 }
@@ -312,7 +318,8 @@ async function completeUpgradeRun({
     record.steps = interruptedUpgradeSteps(record.steps, record.message);
   } finally {
     record.updatedAt = new Date().toISOString();
-    upgradeRuns.set(runId, record);
+    record.updatedAtMs = Date.now();
+    setUpgradeRunRecord(record);
   }
 }
 
@@ -358,7 +365,7 @@ function completedRun({
   steps: UpgradeRunStep[];
 }): UpgradeRunSnapshot {
   const now = new Date().toISOString();
-  const snapshot: UpgradeRunSnapshot = {
+  const snapshot: UpgradeRunRecord = {
     id,
     repositoryUrl,
     packageName,
@@ -372,12 +379,57 @@ function completedRun({
     startedAt: now,
     updatedAt: now,
     changedFiles: [],
-    pullRequest: null
+    pullRequest: null,
+    updatedAtMs: Date.now()
   };
 
-  upgradeRuns.set(id, snapshot);
+  setUpgradeRunRecord(snapshot);
 
   return snapshot;
+}
+
+function setUpgradeRunRecord(record: UpgradeRunRecord) {
+  upgradeRuns.set(record.id, record);
+  pruneUpgradeRuns();
+}
+
+function pruneUpgradeRuns() {
+  const now = Date.now();
+  const retentionMs = readPositiveIntegerEnv(
+    "UPGRADEPILOT_RUN_RETENTION_MS",
+    DEFAULT_RUN_RETENTION_MS
+  );
+  const maxRuns = readPositiveIntegerEnv("UPGRADEPILOT_MAX_RUNS", DEFAULT_MAX_RUNS);
+
+  for (const [runId, record] of upgradeRuns) {
+    if (record.status === "completed" && now - record.updatedAtMs > retentionMs) {
+      upgradeRuns.delete(runId);
+    }
+  }
+
+  const completedRuns = [...upgradeRuns.values()]
+    .filter((record) => record.status === "completed")
+    .sort((left, right) => left.updatedAtMs - right.updatedAtMs);
+
+  while (upgradeRuns.size > maxRuns && completedRuns.length > 0) {
+    const oldest = completedRuns.shift();
+
+    if (oldest) {
+      upgradeRuns.delete(oldest.id);
+    }
+  }
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const rawValue = process.env[name];
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function plannedUpgradeSteps({
