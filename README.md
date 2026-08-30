@@ -1,48 +1,269 @@
 # UpgradePilot
 
-UpgradePilot is an open-source TypeScript application for verified dependency-upgrade workflows.
+UpgradePilot is a developer workspace for verified dependency upgrades in public GitHub Node.js repositories.
 
-The current milestone inspects public GitHub npm repositories, displays dependency inventory, and prepares deterministic baseline verification through the configured TrueForge sandbox boundary.
+It does more than identify outdated packages. UpgradePilot establishes a real baseline, applies an upgrade inside an isolated sandbox, runs the repository's own checks, and only reaches for an AI repair agent when execution proves the upgrade caused a compatibility failure.
+
+## Qodo Code Review Evidence
+
+Qodo is used as an independent review layer for UpgradePilot pull requests.
+
+Status: placeholder for hackathon evidence. After the demo recording, this section will be updated with representative Qodo-reviewed PRs, screenshots, and a short before/after summary of findings that improved the project.
+
+Representative merged PR:
+
+- TODO: Add link to the strongest merged Qodo-reviewed PR.
+
+Planned evidence highlights:
+
+- Qodo findings triaged into fixed, deferred, or intentionally dismissed with rationale.
+- Follow-up hardening PRs created from valid review comments on earlier rapid-prototype PRs.
+- Screenshots or carousel showing Qodo comments and the resulting code/test/doc improvements.
+- Summary of how Qodo improved OSS readiness: tests, error handling, secret handling, deployment docs, and maintainability.
+
+## What The Agent Does
+
+UpgradePilot guides a dependency upgrade from repository inspection to a verified pull request:
+
+```text
+repo -> dependencies -> select upgrade -> sandbox -> baseline -> upgrade -> verify -> repair if needed -> re-verify -> PR
+```
+
+Core behavior:
+
+- Inspects public GitHub npm/pnpm repositories.
+- Detects package manager, lockfile, runtime requirement, dependencies, devDependencies, scripts, and current resolved versions.
+- Fetches latest package versions from the npm registry.
+- Runs baseline verification through TrueForge + Daytona with zero model calls.
+- Applies selected dependency upgrades in an isolated sandbox.
+- Runs deterministic verification commands.
+- Invokes the TrueForge repair agent only when verification fails because of upgrade-related source compatibility drift.
+- Creates a GitHub pull request only after the upgrade is verified.
+
+## TrueForge Integration
+
+UpgradePilot is the product UI and orchestration layer. TrueForge is the execution and agent harness underneath it.
+
+The deterministic happy path runs through:
+
+```text
+UpgradePilot -> TrueForge -> Daytona -> deterministic workflow
+```
+
+Baseline verification and passing upgrade verification do not use an LLM. The model path is reserved for repair after a genuine verification failure.
+
+Current TrueForge usage:
+
+- Deterministic sandbox APIs for npm baseline and upgrade verification.
+- Daytona as the configured sandbox provider.
+- TrueForge agent/session flow for repair handoff after failed verification.
+- Explicit environment-based configuration for Daytona and Gemini via `scripts/configure-trueforge.mjs`.
+
+## Architecture
+
+```mermaid
+flowchart TD
+  User[Developer or judge] --> UI[UpgradePilot workspace UI]
+  UI --> API[Next.js server routes]
+
+  API --> GitHub[GitHub API]
+  API --> Registry[npm Registry]
+  API --> TF[Patched TrueForge server]
+
+  GitHub --> API
+  Registry --> API
+
+  TF --> Daytona[Daytona sandbox provider]
+  Daytona --> Sandbox[Isolated sandbox]
+
+  Sandbox --> Baseline[Baseline workflow]
+  Sandbox --> Upgrade[Upgrade verification workflow]
+
+  Upgrade --> Checks{Verification passed?}
+  Checks -->|Yes| Evidence[Execution evidence]
+  Checks -->|No, runtime/install blocker| Blocked[Blocked result]
+  Checks -->|No, source compatibility drift| Repair[TrueForge repair agent]
+
+  Repair --> Reverify[Deterministic re-verification]
+  Reverify --> Evidence
+  Evidence --> PR[GitHub pull request]
+
+  Qodo[Qodo review] -. reviews .-> PR
+  Human[Human maintainer] -. approves .-> PR
+```
 
 ## Tech Stack
 
 - Next.js with the App Router
 - TypeScript in strict mode
 - Tailwind CSS
-- shadcn/ui conventions
 - ESLint and Prettier
-- Vitest for unit tests
-- Playwright prepared for future E2E tests
-- GitHub Actions CI
-- Conventional Commits
+- Vitest
+- Playwright-ready E2E setup
+- TrueForge as the sandbox/agent harness
+- Daytona as the configured sandbox provider
+- Qodo for independent pull request review
 
-## Getting Started
+## Demo And Judge Setup
 
-Install dependencies:
+There are two practical ways to run the project.
+
+### UI And Inspection Mode
+
+This mode does not require secrets. It supports the workspace UI, public repository inspection, dependency inventory, and npm registry latest-version lookup.
 
 ```bash
 npm install
+cp .env.example .env.local
+npm run dev -- --port 3000
 ```
 
-Start the development server:
-
-```bash
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-Inspect any public GitHub npm repository by entering a URL such as:
+Open:
 
 ```text
-https://github.com/owner/repository
+http://localhost:3000
 ```
+
+### Full Execution Mode
+
+This mode runs real baseline and upgrade verification through TrueForge + Daytona. It requires credentials.
+
+Required:
+
+- A running patched TrueForge server
+- Daytona API key
+- Optional GitHub token for higher API limits and PR creation
+- Optional Gemini key for repair-agent handoff
+
+Start TrueForge locally:
+
+```powershell
+cd C:\Users\jaivi\Downloads\trueforge
+pnpm standalone:dev
+```
+
+Start UpgradePilot:
+
+```powershell
+cd C:\Users\jaivi\Documents\ChatGPT\UpgradePilot
+npm run dev -- --port 3000
+```
+
+Configure TrueForge from your local `.env.local`:
+
+```bash
+node --env-file=.env.local scripts/configure-trueforge.mjs
+```
+
+## Docker Compose
+
+Docker Compose is the easiest way to share UpgradePilot with judges or teammates.
+
+The TrueForge repository used for this project is a regular local clone with local patches. It is not vendored into UpgradePilot. Build and publish that patched TrueForge image first, then UpgradePilot Compose can pull it.
+
+### 1. Build And Push Patched TrueForge
+
+From the TrueForge clone:
+
+```powershell
+cd C:\Users\jaivi\Downloads\trueforge
+docker build -f Dockerfile.dev -t jvxdock/trueforget-sandbox-repo:upgradepilot-mvp .
+docker push jvxdock/trueforget-sandbox-repo:upgradepilot-mvp
+```
+
+Use the exact pushed image in `.env`:
+
+```env
+TRUEFORGE_IMAGE=jvxdock/trueforget-sandbox-repo:upgradepilot-mvp
+```
+
+### 2. Run UpgradePilot Stack
+
+From this repository:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+TrueForge is available on:
+
+```text
+http://localhost:8790
+```
+
+If `.env` has no secrets, the UI and public GitHub inspection can still run. Real sandbox baseline/upgrade verification requires Daytona credentials.
+
+## Environment And Secrets
+
+Never commit `.env`, `.env.local`, GitHub tokens, Gemini keys, Daytona keys, or generated credential files.
+
+Server-side UpgradePilot values:
+
+```env
+TRUEFORGE_BASE_URL=http://localhost:8790
+GITHUB_TOKEN=
+TRUEFORGE_MODEL_NAME=google-gemini/gemini-2.5-flash
+```
+
+TrueForge/Daytona values:
+
+```env
+DAYTONA_API_KEY=
+DAYTONA_API_URL=
+DAYTONA_TARGET=
+DAYTONA_EXEC_TIMEOUT_MS=600000
+DAYTONA_AUTO_STOP_MINUTES=5
+DAYTONA_AUTO_ARCHIVE_MINUTES=60
+DAYTONA_AUTO_DELETE_MINUTES=7200
+```
+
+Repair-agent model values:
+
+```env
+GEMINI_API_KEY=
+TRUEFORGE_GEMINI_MODEL_ID=gemini-2.5-flash
+TRUEFORGE_GEMINI_MODEL_NAME=gemini-2.5-flash
+TRUEFORGE_REPAIR_REASONING_EFFORT=low
+TRUEFORGE_REPAIR_MAX_TOKENS=2400
+TRUEFORGE_REPAIR_ITERATION_LIMIT=5
+TRUEFORGE_REPAIR_MIN_INTERVAL_MS=15000
+TRUEFORGE_REPAIR_BACKOFF_MS=15000
+```
+
+`GITHUB_TOKEN` is used only by UpgradePilot server routes for GitHub API calls and PR creation. It is never required in browser code.
+
+`DAYTONA_API_KEY` and `GEMINI_API_KEY` are passed to the TrueForge configure helper. They are not baked into Docker images.
+
+## Configure TrueForge From Env
+
+The helper script waits for TrueForge and configures:
+
+- Daytona sandbox provider when `DAYTONA_API_KEY` is set
+- Google Gemini model provider when `GEMINI_API_KEY` is set
+
+For Docker Compose this runs automatically as the `trueforge-configure` service.
+
+For local development, run it after TrueForge starts:
+
+```bash
+node --env-file=.env.local scripts/configure-trueforge.mjs
+```
+
+The script does not print secret values.
 
 ## Quality Checks
 
 Run the same checks used by CI:
 
 ```bash
+npm run format:check
 npm run lint
 npm run typecheck
 npm run test
@@ -50,44 +271,10 @@ npm run build
 npm run e2e
 ```
 
-Format files:
+## Product Scope
 
-```bash
-npm run format
-```
+UpgradePilot currently targets Node.js dependency upgrades for GitHub repositories.
 
-Check formatting:
+The MVP intentionally does not implement broad ecosystem support, vulnerability scanning, package recommendation ranking, automatic merging, billing, or account management.
 
-```bash
-npm run format:check
-```
-
-## Environment
-
-Copy `.env.example` to `.env.local` for local development.
-
-`TRUEFORGE_BASE_URL` points UpgradePilot at an already-running TrueForge service. The expected local default is:
-
-```text
-TRUEFORGE_BASE_URL=http://localhost:8790
-```
-
-`GITHUB_TOKEN` is optional and server-side only. Public repository inspection works without it, but GitHub will apply unauthenticated rate limits.
-
-## Milestone 1 Flow
-
-1. Fetch public GitHub repository metadata.
-2. Read root `package.json` and `package-lock.json` through GitHub's API.
-3. Extract Node requirement, npm lockfile status, dependencies, devDependencies, current versions, and verification scripts.
-4. Display the repository detail page with the dependency inventory.
-5. Prepare baseline verification in deterministic application code: `npm ci`, then available `format:check`, `lint`, `typecheck`, `test`, and `build`.
-
-## TrueForge Integration
-
-UpgradePilot talks to TrueForge through `TRUEFORGE_BASE_URL`. The current adapter validates `/healthz`, `/api/v1/openapi.json`, and `/api/v1/settings/sandbox-providers`.
-
-The confirmed TrueForge `0.2.0-rc.0` API exposes agent sessions and sandbox provider configuration, but does not expose a direct deterministic sandbox command execution endpoint. UpgradePilot therefore reports baseline verification as blocked rather than routing routine orchestration through an LLM conversation.
-
-## Project Scope
-
-This milestone does not include dependency upgrades, AI repair, GitHub authentication flows, PR creation, Qodo integration, vulnerability scanning, or latest-version recommendation logic.
+Do not treat model output as proof. Success requires real execution evidence from baseline and post-upgrade verification.

@@ -455,6 +455,50 @@ describe("RepositoryWorkspace", () => {
     expect(screen.getByText("Verified upgrade")).toBeVisible();
   });
 
+  it("shows blocked upgrade results on the repository dependency row", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      Response.json(
+        {
+          run: makeUpgradeRun({
+            status: "completed",
+            outcome: "blocked",
+            message: "Runtime change required before UpgradePilot can proceed."
+          })
+        },
+        { status: 200 }
+      )
+    );
+    render(<RepositoryWorkspace />);
+
+    await screen.findByRole("heading", { name: "widgets" });
+    fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
+    expect(await screen.findByText("Upgrade run")).toBeVisible();
+    expect(screen.getByText("Blocked")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to repository" }));
+
+    expect(await screen.findByRole("heading", { name: "Dependencies" })).toBeVisible();
+    expect(screen.getByText("Blocked")).toBeVisible();
+  });
+
   it("keeps Verify Upgrade on the repository page when baseline fails", async () => {
     const repository = workspaceRepositoryFromInspection(
       makeRepositoryInspection("acme", "widgets"),
@@ -833,7 +877,15 @@ function makeBaselineSteps(): WorkspaceBaselineStep[] {
   ];
 }
 
-function makeUpgradeRun({ status = "running" }: { status?: "running" | "completed" } = {}) {
+function makeUpgradeRun({
+  status = "running",
+  outcome = status === "completed" ? "verified" : null,
+  message = "Preparing deterministic upgrade verification."
+}: {
+  status?: "running" | "completed";
+  outcome?: "verified" | "blocked" | "repair_failed" | "interrupted" | null;
+  message?: string;
+} = {}) {
   return {
     id: "upgrade-1",
     repositoryUrl: "https://github.com/acme/widgets",
@@ -841,8 +893,8 @@ function makeUpgradeRun({ status = "running" }: { status?: "running" | "complete
     currentVersion: "18.3.1",
     targetVersion: "19.0.0",
     status,
-    outcome: status === "completed" ? "verified" : null,
-    message: "Preparing deterministic upgrade verification.",
+    outcome,
+    message,
     startedAt: "2026-08-28T10:00:00Z",
     updatedAt: status === "completed" ? "2026-08-28T10:01:00Z" : null,
     changedFiles:

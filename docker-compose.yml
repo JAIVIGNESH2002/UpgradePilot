@@ -1,0 +1,64 @@
+name: upgradepilot
+
+services:
+  trueforge:
+    image: ${TRUEFORGE_IMAGE:-jvxdock/trueforget-sandbox-repo:upgradepilot-mvp}
+    ports:
+      - "8790:8790"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      STANDALONE: "true"
+      HOST: 0.0.0.0
+      PORT: 8790
+      APP_DATA_DIR_SUFFIX: upgradepilot-docker
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8790/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  trueforge-configure:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TRUEFORGE_BASE_URL: http://trueforge:8790
+    command: ["node", "scripts/configure-trueforge.mjs"]
+    depends_on:
+      trueforge:
+        condition: service_healthy
+    restart: "no"
+
+  upgradepilot:
+    build:
+      context: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      TRUEFORGE_BASE_URL: http://trueforge:8790
+      NEXT_PUBLIC_APP_NAME: UpgradePilot
+    depends_on:
+      trueforge:
+        condition: service_healthy
+      trueforge-configure:
+        condition: service_completed_successfully
+    restart: unless-stopped

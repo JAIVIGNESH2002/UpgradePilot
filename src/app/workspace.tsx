@@ -59,6 +59,7 @@ type PullRequestState =
   | { status: "creating"; runId: string }
   | { status: "error"; runId: string; message: string };
 type ThemePreference = "light" | "dark";
+type DependencyUpgradeState = "verified" | "blocked" | "repair_failed" | "interrupted";
 type RepositoryRefreshState =
   | { status: "idle" }
   | { status: "loading"; repositoryId: string }
@@ -198,7 +199,9 @@ export function RepositoryWorkspace() {
   const [activeUpgradeRun, setActiveUpgradeRun] = useState<UpgradeRunSnapshot | null>(null);
   const [pullRequestState, setPullRequestState] = useState<PullRequestState>({ status: "idle" });
   const [theme, setTheme] = useState<ThemePreference>(() => initialThemePreference());
-  const [verifiedUpgradeKeys, setVerifiedUpgradeKeys] = useState<Set<string>>(new Set());
+  const [dependencyUpgradeStates, setDependencyUpgradeStates] = useState<
+    Map<string, DependencyUpgradeState>
+  >(new Map());
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DependencyFilter>("all");
   const [hasLoadedWorkspace, setHasLoadedWorkspace] = useState(false);
@@ -605,19 +608,8 @@ export function RepositoryWorkspace() {
         currentRun = await parseUpgradeRunResponse(response);
         setActiveUpgradeRun(currentRun);
 
-        if (currentRun.status === "completed" && currentRun.outcome === "verified") {
-          const verifiedRun = currentRun;
-          setVerifiedUpgradeKeys((currentKeys) => {
-            const nextKeys = new Set(currentKeys);
-            nextKeys.add(
-              upgradeVerificationKey({
-                repositoryId,
-                packageName: verifiedRun.packageName,
-                targetVersion: verifiedRun.targetVersion
-              })
-            );
-            return nextKeys;
-          });
+        if (currentRun.status === "completed") {
+          markDependencyUpgradeState(repositoryId, currentRun);
         }
       }
     } catch (error) {
@@ -665,24 +657,44 @@ export function RepositoryWorkspace() {
     dependency: WorkspaceDependency,
     run: UpgradeRunSnapshot
   ) {
-    if (
-      run.status !== "completed" ||
-      run.outcome !== "verified" ||
-      dependency.latestVersion === null
-    ) {
+    if (run.status !== "completed" || run.outcome === null || dependency.latestVersion === null) {
       return;
     }
 
-    setVerifiedUpgradeKeys((currentKeys) => {
-      const nextKeys = new Set(currentKeys);
-      nextKeys.add(
+    const outcome = run.outcome;
+
+    setDependencyUpgradeStates((currentStates) => {
+      const nextStates = new Map(currentStates);
+      nextStates.set(
         upgradeVerificationKey({
           repositoryId: repository.id,
           packageName: dependency.packageName,
           targetVersion: dependency.latestVersion
-        })
+        }),
+        outcome
       );
-      return nextKeys;
+      return nextStates;
+    });
+  }
+
+  function markDependencyUpgradeState(repositoryId: string, run: UpgradeRunSnapshot) {
+    if (run.status !== "completed" || run.outcome === null) {
+      return;
+    }
+
+    const outcome = run.outcome;
+
+    setDependencyUpgradeStates((currentStates) => {
+      const nextStates = new Map(currentStates);
+      nextStates.set(
+        upgradeVerificationKey({
+          repositoryId,
+          packageName: run.packageName,
+          targetVersion: run.targetVersion
+        }),
+        outcome
+      );
+      return nextStates;
     });
   }
 
@@ -723,7 +735,7 @@ export function RepositoryWorkspace() {
               baselineActionState={baselineActionState}
               repositoryRefreshState={repositoryRefreshState}
               upgradePreparationState={upgradePreparationState}
-              verifiedUpgradeKeys={verifiedUpgradeKeys}
+              dependencyUpgradeStates={dependencyUpgradeStates}
               onQueryChange={setQuery}
               onFilterChange={setFilter}
               onRunBaseline={runBaseline}
@@ -755,7 +767,7 @@ function TopHeader({
         <div className="min-w-0">
           <h1 className="truncate text-base font-semibold">UpgradePilot</h1>
           <p className="hidden text-sm text-muted-foreground sm:block">
-            Repository dependencies and verified upgrade preparation
+            Upgrade dependencies with proof, not crossed fingers
           </p>
         </div>
       </div>
@@ -1083,7 +1095,7 @@ function RepositoryDetail({
   baselineActionState,
   repositoryRefreshState,
   upgradePreparationState,
-  verifiedUpgradeKeys,
+  dependencyUpgradeStates,
   onQueryChange,
   onFilterChange,
   onRunBaseline,
@@ -1096,7 +1108,7 @@ function RepositoryDetail({
   baselineActionState: BaselineActionState;
   repositoryRefreshState: RepositoryRefreshState;
   upgradePreparationState: UpgradePreparationState;
-  verifiedUpgradeKeys: Set<string>;
+  dependencyUpgradeStates: Map<string, DependencyUpgradeState>;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
   onRunBaseline: (
@@ -1137,7 +1149,7 @@ function RepositoryDetail({
         query={query}
         filter={filter}
         repositoryRefreshState={repositoryRefreshState}
-        verifiedUpgradeKeys={verifiedUpgradeKeys}
+        dependencyUpgradeStates={dependencyUpgradeStates}
         onQueryChange={onQueryChange}
         onFilterChange={onFilterChange}
         onRefreshRepository={onRefreshRepository}
@@ -1410,7 +1422,7 @@ function DependencySurface({
   query,
   filter,
   repositoryRefreshState,
-  verifiedUpgradeKeys,
+  dependencyUpgradeStates,
   onQueryChange,
   onFilterChange,
   onRefreshRepository,
@@ -1422,7 +1434,7 @@ function DependencySurface({
   query: string;
   filter: DependencyFilter;
   repositoryRefreshState: RepositoryRefreshState;
-  verifiedUpgradeKeys: Set<string>;
+  dependencyUpgradeStates: Map<string, DependencyUpgradeState>;
   onQueryChange: (value: string) => void;
   onFilterChange: (value: DependencyFilter) => void;
   onRefreshRepository: (
@@ -1525,7 +1537,7 @@ function DependencySurface({
                     key={`${dependency.kind}:${dependency.packageName}`}
                     repository={repository}
                     dependency={dependency}
-                    isVerified={verifiedUpgradeKeys.has(
+                    upgradeState={dependencyUpgradeStates.get(
                       upgradeVerificationKey({
                         repositoryId: repository.id,
                         packageName: dependency.packageName,
@@ -1547,12 +1559,12 @@ function DependencySurface({
 function DependencyRow({
   repository,
   dependency,
-  isVerified,
+  upgradeState,
   onPrepareVerifyUpgrade
 }: {
   repository: WorkspaceRepository;
   dependency: WorkspaceDependency;
-  isVerified: boolean;
+  upgradeState: DependencyUpgradeState | undefined;
   onPrepareVerifyUpgrade: (
     repository: WorkspaceRepository,
     dependency: WorkspaceDependency
@@ -1596,11 +1608,8 @@ function DependencyRow({
         ) : null}
       </td>
       <td className="px-4 py-3">
-        {isVerified ? (
-          <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-success">
-            <CheckCircle2 className="size-4" aria-hidden="true" />
-            Verified upgrade
-          </span>
+        {upgradeState ? (
+          <DependencyUpgradeStateLabel state={upgradeState} />
         ) : hasUpgradeTarget ? (
           <Button
             type="button"
@@ -1617,6 +1626,42 @@ function DependencyRow({
         )}
       </td>
     </tr>
+  );
+}
+
+function DependencyUpgradeStateLabel({ state }: { state: DependencyUpgradeState }) {
+  if (state === "verified") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-success">
+        <CheckCircle2 className="size-4" aria-hidden="true" />
+        Verified upgrade
+      </span>
+    );
+  }
+
+  if (state === "blocked") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-amber-700 dark:text-amber-200">
+        <MinusCircle className="size-4" aria-hidden="true" />
+        Blocked
+      </span>
+    );
+  }
+
+  if (state === "interrupted") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-muted-foreground">
+        <MinusCircle className="size-4" aria-hidden="true" />
+        Interrupted
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-destructive">
+      <XCircle className="size-4" aria-hidden="true" />
+      Repair failed
+    </span>
   );
 }
 
