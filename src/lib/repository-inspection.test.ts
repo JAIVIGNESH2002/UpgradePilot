@@ -10,7 +10,7 @@ describe("inspectPublicNpmRepository", () => {
       if (href === "https://api.github.com/repos/acme/widgets") {
         return Response.json({
           name: "widgets",
-          owner: { login: "acme" },
+          owner: { login: "acme" }, private: false,
           html_url: "https://github.com/acme/widgets",
           description: "Useful widgets",
           default_branch: "main",
@@ -72,7 +72,7 @@ describe("inspectPublicNpmRepository", () => {
       if (href === "https://api.github.com/repos/acme/pnpm-demo") {
         return Response.json({
           name: "pnpm-demo",
-          owner: { login: "acme" },
+          owner: { login: "acme" }, private: false,
           html_url: "https://github.com/acme/pnpm-demo",
           description: null,
           default_branch: "main",
@@ -110,7 +110,7 @@ describe("inspectPublicNpmRepository", () => {
       if (href === "https://api.github.com/repos/acme/no-node") {
         return Response.json({
           name: "no-node",
-          owner: { login: "acme" },
+          owner: { login: "acme" }, private: false,
           html_url: "https://github.com/acme/no-node",
           description: null,
           default_branch: "main",
@@ -127,5 +127,35 @@ describe("inspectPublicNpmRepository", () => {
         fetchImpl: fetchImpl as typeof fetch
       })
     ).rejects.toThrow("root package.json");
+  });
+
+  it("rejects private repositories before fetching manifests", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+
+      if (href === "https://api.github.com/repos/acme/secret") {
+        return Response.json({
+          name: "secret",
+          owner: { login: "acme" },
+          private: true,
+          visibility: "private",
+          html_url: "https://github.com/acme/secret",
+          description: null,
+          default_branch: "main",
+          language: null,
+          updated_at: "2026-08-27T10:00:00Z"
+        });
+      }
+
+      throw new Error(`Unexpected file fetch: ${href}`);
+    });
+
+    await expect(
+      inspectPublicNpmRepository("https://github.com/acme/secret", {
+        token: "server-token",
+        fetchImpl: fetchImpl as typeof fetch
+      })
+    ).rejects.toThrow("Only public GitHub repositories are supported");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

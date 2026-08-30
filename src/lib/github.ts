@@ -13,7 +13,8 @@ export type GitHubRepositoryMetadata = GitHubRepositoryRef & {
 
 type GitHubRepositoryApiResponse = {
   name: string;
-  full_name: string;
+  private: boolean;
+  visibility?: string;
   owner: {
     login: string;
   };
@@ -38,6 +39,19 @@ type GitHubPullRequestResponse = {
   html_url: string;
   number: number;
 };
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 100;
+const MAX_JSON_BYTES = 256 * 1024;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+const metadataCache = new Map<string, { expiresAt: number; value: GitHubRepositoryMetadata }>();
+const fileCache = new Map<string, { expiresAt: number; value: string | null }>();
+
+export function clearGitHubCachesForTests(): void {
+  metadataCache.clear();
+  fileCache.clear();
+}
 
 export type GitHubPullRequestInput = {
   repositoryUrl: string;
@@ -101,11 +115,19 @@ export class GitHubClient {
   }
 
   async getRepositoryMetadata(ref: GitHubRepositoryRef): Promise<GitHubRepositoryMetadata> {
-    const response = await this.requestJson<GitHubRepositoryApiResponse>(
-      `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.name)}`
+    const url = `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
+      ref.name
+    )}`;
+
+    const response = validateRepositoryApiResponse(
+      await this.requestJson<unknown>(url, {}, { maxBytes: MAX_JSON_BYTES })
     );
 
-    return {
+    if (response.private || response.visibility === "private") {
+      throw new GitHubRepositoryError("Only public GitHub repositories are supported.");
+    }
+
+    const metadata = {
       owner: response.owner.login,
       name: response.name,
       url: response.html_url,
@@ -114,6 +136,10 @@ export class GitHubClient {
       language: response.language,
       updatedAt: response.updated_at
     };
+
+    writeCache(metadataCache, url, metadata);
+
+    return metadata;
   }
 
   async createPullRequest(input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> {
@@ -235,27 +261,42 @@ export class GitHubClient {
     const url = `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(
       ref.name
     )}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
+    const cacheKey = `${this.token ? "auth" : "anon"}:${url}`;
+    const cached = readCache(fileCache, cacheKey);
+
+    if (cached !== undefined) {
+      return cached;
+    }
 
     const response = await this.fetchGitHub(url, {
       headers: this.headers({ accept: "application/vnd.github.raw" }),
-      cache: "no-store"
+      cache: "force-cache",
+      next: { revalidate: 300 }
     });
 
     if (response.status === 404) {
-      return this.getRawRepositoryFileText(ref, path, branch);
+      const rawText = await this.getRawRepositoryFileText(ref, path, branch);
+      writeCache(fileCache, cacheKey, rawText);
+
+      return rawText;
     }
 
     if (!response.ok) {
       const rawText = await this.getRawRepositoryFileText(ref, path, branch);
 
       if (rawText !== null) {
+        writeCache(fileCache, cacheKey, rawText);
+
         return rawText;
       }
 
       throw new GitHubRepositoryError(`GitHub returned ${response.status} while fetching ${path}.`);
     }
 
-    return response.text();
+    const text = await readResponseTextWithLimit(response, MAX_FILE_BYTES, path);
+    writeCache(fileCache, cacheKey, text);
+
+    return text;
   }
 
   private async getRawRepositoryFileText(
@@ -275,7 +316,8 @@ export class GitHubClient {
         Accept: "text/plain",
         "User-Agent": "UpgradePilot"
       },
-      cache: "no-store"
+      cache: "force-cache",
+      next: { revalidate: 300 }
     });
 
     if (response.status === 404) {
@@ -286,21 +328,34 @@ export class GitHubClient {
       throw new GitHubRepositoryError(`GitHub returned ${response.status} while fetching ${path}.`);
     }
 
-    return response.text();
+    return readResponseTextWithLimit(response, MAX_FILE_BYTES, path);
   }
 
-  private async requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  private async requestJson<T>(
+    url: string,
+    init: RequestInit = {},
+    options: { maxBytes?: number } = {}
+  ): Promise<T> {
     const response = await this.fetchGitHub(url, {
       ...init,
       headers: this.headers({ accept: "application/vnd.github+json" }),
-      cache: "no-store"
+      cache: init.method ? "no-store" : "force-cache",
+      next: init.method ? undefined : { revalidate: 300 }
     });
 
     if (!response.ok) {
       throw new GitHubRepositoryError(`GitHub returned ${response.status} for ${url}.`);
     }
 
-    return response.json() as Promise<T>;
+    const text = await readResponseTextWithLimit(response, options.maxBytes ?? MAX_JSON_BYTES, url);
+
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      throw new GitHubRepositoryError("GitHub returned a malformed JSON response.", {
+        cause: error
+      });
+    }
   }
 
   private headers({ accept }: { accept: string }): HeadersInit {
@@ -330,6 +385,125 @@ function encodeRepositoryPath(path: string): string {
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
+}
+
+function validateRepositoryApiResponse(input: unknown): GitHubRepositoryApiResponse {
+  if (!isRecord(input) || !isRecord(input.owner)) {
+    throw new GitHubRepositoryError("GitHub returned malformed repository metadata.");
+  }
+
+  const repository = input as Record<string, unknown>;
+  const owner = input.owner as Record<string, unknown>;
+
+  if (
+    typeof repository.name !== "string" ||
+    typeof repository.private !== "boolean" ||
+    typeof owner.login !== "string" ||
+    typeof repository.html_url !== "string" ||
+    typeof repository.default_branch !== "string" ||
+    typeof repository.updated_at !== "string" ||
+    (repository.description !== null && typeof repository.description !== "string") ||
+    (repository.language !== null && typeof repository.language !== "string") ||
+    (repository.visibility !== undefined && typeof repository.visibility !== "string")
+  ) {
+    throw new GitHubRepositoryError("GitHub returned malformed repository metadata.");
+  }
+
+  return input as GitHubRepositoryApiResponse;
+}
+
+async function readResponseTextWithLimit(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+
+  if (contentLength !== null && Number.parseInt(contentLength, 10) > maxBytes) {
+    throw new GitHubRepositoryError(`${label} is too large to inspect safely.`);
+  }
+
+  if (!response.body) {
+    const text = await response.text();
+    throwIfTooLarge(text, maxBytes, label);
+
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    total += value.byteLength;
+
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new GitHubRepositoryError(`${label} is too large to inspect safely.`);
+    }
+
+    chunks.push(value);
+  }
+
+  return new TextDecoder().decode(concatChunks(chunks, total));
+}
+
+function throwIfTooLarge(text: string, maxBytes: number, label: string) {
+  if (new TextEncoder().encode(text).byteLength > maxBytes) {
+    throw new GitHubRepositoryError(`${label} is too large to inspect safely.`);
+  }
+}
+
+function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
+  const output = new Uint8Array(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return output;
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function readCache<T>(
+  cache: Map<string, { expiresAt: number; value: T }>,
+  key: string
+): T | undefined {
+  const cached = cache.get(key);
+
+  if (!cached) {
+    return undefined;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return undefined;
+  }
+
+  return cached.value;
+}
+
+function writeCache<T>(cache: Map<string, { expiresAt: number; value: T }>, key: string, value: T) {
+  if (cache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+
+    if (oldestKey) {
+      cache.delete(oldestKey);
+    }
+  }
+
+  cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, value });
 }
 
 function describeGitHubNetworkFailure(error: unknown): string {

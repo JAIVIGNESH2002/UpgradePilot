@@ -151,6 +151,7 @@ type TrueForgeUpgradeWorkflowResult = {
 const UPGRADEPILOT_UPGRADE_RESULT_MARKER = "UPGRADEPILOT_UPGRADE_RESULT";
 const DEFAULT_REPAIR_TURN_INTERVAL_MS = 15_000;
 const DEFAULT_REPAIR_BACKOFF_MS = 20_000;
+const DEFAULT_TRUEFORGE_REQUEST_TIMEOUT_MS = 15_000;
 
 export class TrueForgeIntegrationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -186,21 +187,27 @@ export class TrueForgeClient {
   }
 
   async getSandboxProviderStatus(): Promise<TrueForgeSandboxProviderStatus | null> {
-    const response = await this.fetchTrueForge("/api/v1/settings/sandbox-providers", {
-      cache: "no-store"
-    });
+    const body = await this.requestTrueForge<SandboxProviderResponse | null>(
+      "/api/v1/settings/sandbox-providers",
+      { cache: "no-store" },
+      async (response) => {
+        if (response.status === 404) {
+          return null;
+        }
 
-    if (response.status === 404) {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(
+            `TrueForge returned ${response.status} while reading sandbox provider settings.`
+          );
+        }
+
+        return (await response.json()) as SandboxProviderResponse;
+      }
+    );
+
+    if (body === null) {
       return null;
     }
-
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(
-        `TrueForge returned ${response.status} while reading sandbox provider settings.`
-      );
-    }
-
-    const body = (await response.json()) as SandboxProviderResponse;
 
     return {
       type: body.data.manifest.type,
@@ -859,62 +866,93 @@ export class TrueForgeClient {
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.fetchTrueForge(path, {
-      headers: {
-        Accept: "application/json"
+    return this.requestTrueForge<T>(
+      path,
+      {
+        headers: {
+          Accept: "application/json"
+        },
+        cache: "no-store"
       },
-      cache: "no-store"
-    });
+      async (response) => {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(`TrueForge returned ${response.status} for ${path}.`);
+        }
 
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(`TrueForge returned ${response.status} for ${path}.`);
-    }
-
-    return response.json() as Promise<T>;
+        return response.json() as Promise<T>;
+      }
+    );
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const response = await this.fetchTrueForge(path, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json"
+    return this.requestTrueForge<T>(
+      path,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body),
+        cache: "no-store"
       },
-      body: JSON.stringify(body),
-      cache: "no-store"
-    });
+      async (response) => {
+        if (!response.ok) {
+          throw new TrueForgeIntegrationError(
+            `TrueForge returned ${response.status} for ${path}: ${await readResponseError(response)}`
+          );
+        }
 
-    if (!response.ok) {
-      throw new TrueForgeIntegrationError(
-        `TrueForge returned ${response.status} for ${path}: ${await readResponseError(response)}`
-      );
-    }
-
-    return response.json() as Promise<T>;
+        return response.json() as Promise<T>;
+      }
+    );
   }
 
-  private async fetchTrueForge(path: string, init: RequestInit): Promise<Response> {
+  private async requestTrueForge<T>(
+    path: string,
+    init: RequestInit,
+    consume: (response: Response) => Promise<T>
+  ): Promise<T> {
     const primaryUrl = this.url(path);
+    const timeoutMs = readPositiveIntegerEnv(
+      "TRUEFORGE_REQUEST_TIMEOUT_MS",
+      DEFAULT_TRUEFORGE_REQUEST_TIMEOUT_MS
+    );
+    const primaryRequest = withAbortDeadline(init, timeoutMs);
 
     try {
-      return await this.fetchImpl(primaryUrl, init);
+      const response = await this.fetchImpl(primaryUrl, primaryRequest.init);
+
+      return await consume(response);
     } catch (error) {
+      if (error instanceof TrueForgeIntegrationError) {
+        throw error;
+      }
+
       const fallbackUrl = localhostFallbackUrl(primaryUrl);
 
       if (fallbackUrl !== null) {
+        const fallbackRequest = withAbortDeadline(init, timeoutMs);
+
         try {
-          return await this.fetchImpl(fallbackUrl, init);
+          const response = await this.fetchImpl(fallbackUrl, fallbackRequest.init);
+
+          return await consume(response);
         } catch (fallbackError) {
           throw new TrueForgeIntegrationError(
             describeTrueForgeNetworkFailure(fallbackError, this.baseUrl),
             { cause: fallbackError }
           );
+        } finally {
+          fallbackRequest.cancel();
         }
       }
 
       throw new TrueForgeIntegrationError(describeTrueForgeNetworkFailure(error, this.baseUrl), {
         cause: error
       });
+    } finally {
+      primaryRequest.cancel();
     }
   }
 
@@ -999,6 +1037,28 @@ function localhostFallbackUrl(input: string): string | null {
   url.hostname = "127.0.0.1";
 
   return url.toString();
+}
+
+function withAbortDeadline(
+  init: RequestInit,
+  timeoutMs: number
+): { init: RequestInit; cancel: () => void } {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = init.signal;
+
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+
+  return {
+    init: { ...init, signal: controller.signal },
+    cancel: () => clearTimeout(timeout)
+  };
 }
 
 function describeTrueForgeNetworkFailure(error: unknown, baseUrl: string): string {

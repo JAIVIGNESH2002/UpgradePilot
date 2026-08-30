@@ -101,4 +101,5 @@
   ::selection {
     @apply bg-primary/20 text-foreground;
   }
+
 }
