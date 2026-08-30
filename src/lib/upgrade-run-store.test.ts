@@ -29,7 +29,7 @@ describe("upgrade-run-store", () => {
     });
   });
 
-  it("progresses deterministic upgrade workflow steps without model calls", async () => {
+  it("keeps deterministic upgrade workflow steps on known backend state without model calls", async () => {
     vi.useFakeTimers();
     let resolveVerification: (value: Awaited<ReturnType<typeof successfulUpgrade>>) => void = () =>
       undefined;
@@ -53,7 +53,16 @@ describe("upgrade-run-store", () => {
     );
 
     expect(run.status).toBe("running");
-    expect(run.steps[0]?.status).toBe("running");
+    expect(run.steps[0]).toMatchObject({
+      name: "Check baseline",
+      status: "passed",
+      output: "Healthy baseline was available before upgrade verification."
+    });
+    expect(run.steps[1]).toMatchObject({
+      name: "Create sandbox",
+      status: "running",
+      output: "Waiting for TrueForge deterministic upgrade workflow output..."
+    });
     expect(run.steps[3]?.command).toBe("pnpm add left-pad@1.3.1");
     expect(runVerification).toHaveBeenCalledWith({
       repositoryUrl: "https://github.com/acme/widgets",
@@ -67,6 +76,7 @@ describe("upgrade-run-store", () => {
 
     expect(progressedRun?.steps[0]?.status).toBe("passed");
     expect(progressedRun?.steps[1]?.status).toBe("running");
+    expect(progressedRun?.steps[2]?.status).toBe("pending");
 
     resolveVerification(successfulUpgrade());
     await vi.runAllTimersAsync();

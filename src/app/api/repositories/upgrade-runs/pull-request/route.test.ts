@@ -63,7 +63,7 @@ describe("POST /api/repositories/upgrade-runs/pull-request", () => {
           runtimeChangeRequired: false,
           sandboxId: "default.sandbox-1",
           cleanup: { status: "deleted" as const },
-          changedFiles: [{ path: "package.json", content: "{\"dependencies\":{\"react\":\"19.0.0\"}}\n" }]
+          changedFiles: [{ path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' }]
         }))
       }
     );
@@ -77,7 +77,7 @@ describe("POST /api/repositories/upgrade-runs/pull-request", () => {
       expect.objectContaining({
         repositoryUrl: "https://github.com/acme/widgets",
         title: "chore: upgrade react to 19.0.0",
-        files: [{ path: "package.json", content: "{\"dependencies\":{\"react\":\"19.0.0\"}}\n" }]
+        files: [{ path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' }]
       })
     );
   });

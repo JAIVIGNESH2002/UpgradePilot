@@ -847,7 +847,7 @@ function makeUpgradeRun({ status = "running" }: { status?: "running" | "complete
     updatedAt: status === "completed" ? "2026-08-28T10:01:00Z" : null,
     changedFiles:
       status === "completed"
-        ? [{ path: "package.json", content: "{\"dependencies\":{\"react\":\"19.0.0\"}}\n" }]
+        ? [{ path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' }]
         : [],
     pullRequest: null,
     steps: [
