@@ -1,4 +1,5 @@
 import type { SandboxProvider, SandboxWorkspace } from "@/lib/baseline";
+import { GitHubClient, parseGitHubRepositoryUrl } from "@/lib/github";
 import {
   buildNpmBaselineTurnPrompt,
   UPGRADEPILOT_BASELINE_RESULT_MARKER
@@ -552,14 +553,85 @@ export class TrueForgeClient {
       fileReplacements: repairPatch.fileReplacements,
       textReplacements: repairPatch.textReplacements
     });
+    const enrichedVerificationResult =
+      verificationResult.status === "VERIFIED"
+        ? await this.includeVerifiedRepairFiles({
+            repositoryUrl: input.repositoryUrl,
+            verificationResult,
+            repairPatch
+          })
+        : verificationResult;
 
     return {
       status: "completed",
       summary: repairPatch.summary,
       sessionId: session.data.id,
       turnId: turn.data.id,
-      verificationResult
+      verificationResult: enrichedVerificationResult
     };
+  }
+
+  private async includeVerifiedRepairFiles(input: {
+    repositoryUrl: string;
+    verificationResult: UpgradeVerificationResult;
+    repairPatch: RepairPatch;
+  }): Promise<UpgradeVerificationResult> {
+    const changedFiles = [...(input.verificationResult.changedFiles ?? [])];
+    const includedPaths = new Set(changedFiles.map((file) => file.path));
+
+    for (const replacement of input.repairPatch.fileReplacements) {
+      if (!includedPaths.has(replacement.path)) {
+        changedFiles.push({ path: replacement.path, content: replacement.content });
+        includedPaths.add(replacement.path);
+      }
+    }
+
+    const missingTextReplacementPaths = [
+      ...new Set(
+        input.repairPatch.textReplacements
+          .map((replacement) => replacement.path)
+          .filter((path) => !includedPaths.has(path))
+      )
+    ];
+
+    if (missingTextReplacementPaths.length === 0) {
+      return { ...input.verificationResult, changedFiles };
+    }
+
+    try {
+      const ref = parseGitHubRepositoryUrl(input.repositoryUrl);
+      const github = new GitHubClient({
+        token: process.env.GITHUB_TOKEN,
+        fetchImpl: this.fetchImpl
+      });
+      const metadata = await github.getRepositoryMetadata(ref);
+
+      for (const path of missingTextReplacementPaths) {
+        const originalContent = await github.getRepositoryFileText(
+          ref,
+          path,
+          metadata.defaultBranch
+        );
+
+        if (originalContent === null) {
+          continue;
+        }
+
+        const repairedContent = applyRepairTextReplacements(
+          originalContent,
+          input.repairPatch.textReplacements.filter((replacement) => replacement.path === path)
+        );
+
+        if (repairedContent !== originalContent) {
+          changedFiles.push({ path, content: repairedContent });
+          includedPaths.add(path);
+        }
+      }
+    } catch {
+      return { ...input.verificationResult, changedFiles };
+    }
+
+    return { ...input.verificationResult, changedFiles };
   }
 
   private async collectNpmUpgradeRepairContext(input: {
@@ -1163,12 +1235,7 @@ function buildUpgradeRepairHandoffPrompt(input: {
   });
 }
 
-function extractRepairPatch(turn: TurnResponse["data"]): {
-  summary: string;
-  unifiedDiff: string | null;
-  fileReplacements: RepairFileReplacement[];
-  textReplacements: RepairTextReplacement[];
-} {
+function extractRepairPatch(turn: TurnResponse["data"]): RepairPatch {
   if (turn.state.status !== "done") {
     return {
       summary: "TrueForge repair agent completed without a final response.",
@@ -1231,6 +1298,13 @@ type RepairFileReplacement = {
   content: string;
 };
 
+type RepairPatch = {
+  summary: string;
+  unifiedDiff: string | null;
+  fileReplacements: RepairFileReplacement[];
+  textReplacements: RepairTextReplacement[];
+};
+
 type RepairTextReplacement = {
   path: string;
   old_text: string;
@@ -1260,6 +1334,25 @@ function parseRepairTextReplacements(value: unknown): RepairTextReplacement[] {
       return null;
     })
     .filter((item): item is RepairTextReplacement => item !== null);
+}
+
+function applyRepairTextReplacements(
+  content: string,
+  replacements: RepairTextReplacement[]
+): string {
+  let nextContent = content;
+
+  for (const replacement of replacements) {
+    const firstIndex = nextContent.indexOf(replacement.old_text);
+
+    if (firstIndex === -1 || nextContent.indexOf(replacement.old_text, firstIndex + 1) !== -1) {
+      continue;
+    }
+
+    nextContent = nextContent.replace(replacement.old_text, replacement.new_text);
+  }
+
+  return nextContent;
 }
 
 function parseRepairFileReplacements(value: unknown): RepairFileReplacement[] {

@@ -36,6 +36,16 @@ export async function POST(request: Request) {
       );
     }
 
+    const lockfilePath = expectedLockfilePath(run.packageManager);
+    if (lockfilePath && !run.changedFiles.some((file) => file.path === lockfilePath)) {
+      return NextResponse.json(
+        {
+          message: `The verified upgrade run did not include ${lockfilePath}. UpgradePilot will not create a manifest-only dependency PR.`
+        },
+        { status: 409 }
+      );
+    }
+
     const branchName = prBranchName(run.packageName, run.targetVersion);
     const title = `chore: upgrade ${run.packageName} to ${run.targetVersion}`;
     const pullRequest = await new GitHubClient({
@@ -74,4 +84,16 @@ function prBranchName(packageName: string, targetVersion: string): string {
     .slice(0, 80);
 
   return `upgradepilot/${slug || "dependency-upgrade"}-${Date.now()}`;
+}
+
+function expectedLockfilePath(packageManager: string): string | null {
+  if (packageManager === "npm") {
+    return "package-lock.json";
+  }
+
+  if (packageManager === "pnpm") {
+    return "pnpm-lock.yaml";
+  }
+
+  return null;
 }

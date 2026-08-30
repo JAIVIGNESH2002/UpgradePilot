@@ -38,12 +38,59 @@ describe("POST /api/repositories/upgrade-runs/pull-request", () => {
     expect(createPullRequestMock).not.toHaveBeenCalled();
   });
 
-  it("creates a pull request from verified changed files", async () => {
+  it("creates a pull request from all verified changed files", async () => {
     createPullRequestMock.mockResolvedValue({
       url: "https://github.com/acme/widgets/pull/7",
       number: 7,
       branchName: "upgradepilot/react-19.0.0-123"
     });
+    const run = startUpgradeRun(
+      {
+        repositoryUrl: "https://github.com/acme/widgets",
+        packageName: "react",
+        currentVersion: "18.3.1",
+        targetVersion: "19.0.0",
+        changeType: "major",
+        packageManager: "npm",
+        baseline: healthyBaseline()
+      },
+      {
+        runVerification: vi.fn(async () => ({
+          status: "VERIFIED" as const,
+          commands: [{ command: "npm run test", exitCode: 0, durationMs: 1, output: "ok" }],
+          skippedScripts: [],
+          modelRepairRequired: false,
+          runtimeChangeRequired: false,
+          sandboxId: "default.sandbox-1",
+          cleanup: { status: "deleted" as const },
+          changedFiles: [
+            { path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' },
+            { path: "package-lock.json", content: '{"packages":{}}\n' },
+            { path: "src/lib/validation.ts", content: "export const schema = z.string();\n" }
+          ]
+        }))
+      }
+    );
+
+    await vi.waitFor(() => expect(getUpgradeRun(run.id)?.status).toBe("completed"));
+    const response = await POST(makeRequest(run.id));
+
+    expect(response.status).toBe(201);
+
+    expect(createPullRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryUrl: "https://github.com/acme/widgets",
+        title: "chore: upgrade react to 19.0.0",
+        files: [
+          { path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' },
+          { path: "package-lock.json", content: '{"packages":{}}\n' },
+          { path: "src/lib/validation.ts", content: "export const schema = z.string();\n" }
+        ]
+      })
+    );
+  });
+
+  it("rejects verified npm upgrade runs without the lockfile change", async () => {
     const run = startUpgradeRun(
       {
         repositoryUrl: "https://github.com/acme/widgets",
@@ -70,16 +117,12 @@ describe("POST /api/repositories/upgrade-runs/pull-request", () => {
 
     await vi.waitFor(() => expect(getUpgradeRun(run.id)?.status).toBe("completed"));
     const response = await POST(makeRequest(run.id));
+    const body = (await response.json()) as { message: string };
 
-    expect(response.status).toBe(201);
-
-    expect(createPullRequestMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        repositoryUrl: "https://github.com/acme/widgets",
-        title: "chore: upgrade react to 19.0.0",
-        files: [{ path: "package.json", content: '{"dependencies":{"react":"19.0.0"}}\n' }]
-      })
-    );
+    expect(response.status).toBe(409);
+    expect(body.message).toContain("package-lock.json");
+    expect(body.message).toContain("manifest-only");
+    expect(createPullRequestMock).not.toHaveBeenCalled();
   });
 });
 

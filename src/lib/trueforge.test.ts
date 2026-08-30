@@ -157,6 +157,26 @@ describe("TrueForgeClient", () => {
         return Response.json({ data: [{ name: "google-gemini/gemini-3-6-flash" }] });
       }
 
+      if (href === "https://api.github.com/repos/acme/demo") {
+        return Response.json({
+          name: "demo",
+          full_name: "acme/demo",
+          owner: { login: "acme" },
+          html_url: "https://github.com/acme/demo",
+          description: null,
+          default_branch: "main",
+          language: "TypeScript",
+          updated_at: "2026-08-30T00:00:00Z"
+        });
+      }
+
+      if (
+        href ===
+        "https://api.github.com/repos/acme/demo/contents/src/lib/validation.ts?ref=main"
+      ) {
+        return new Response("export const schema = z.string({ required_error: 'Required' });\n");
+      }
+
       if (href.endsWith("/api/v1/sessions") && method === "POST") {
         return Response.json({ data: { id: "session-1" } });
       }
@@ -267,7 +287,15 @@ describe("TrueForgeClient", () => {
       status: "completed",
       sessionId: "session-1",
       turnId: "turn-1",
-      verificationResult: { status: "VERIFIED" }
+      verificationResult: {
+        status: "VERIFIED",
+        changedFiles: [
+          {
+            path: "src/lib/validation.ts",
+            content: "export const schema = z.string().min(1, 'Required');\n"
+          }
+        ]
+      }
     });
     expect(result.summary).toContain("API migration");
     expect(

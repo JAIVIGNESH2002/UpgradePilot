@@ -22,6 +22,7 @@ export type UpgradeRunSnapshot = {
   packageName: string;
   currentVersion: string;
   targetVersion: string;
+  packageManager: VerificationPackageManager;
   status: UpgradeRunStatus;
   outcome: UpgradeRunOutcome | null;
   message: string;
@@ -115,6 +116,7 @@ export function startUpgradeRun(
       packageName,
       currentVersion,
       targetVersion,
+      packageManager: input.packageManager,
       outcome: "interrupted",
       message: "Upgrade run is missing required repository or dependency version information.",
       steps: []
@@ -128,6 +130,7 @@ export function startUpgradeRun(
       packageName,
       currentVersion,
       targetVersion,
+      packageManager: input.packageManager,
       outcome: "blocked",
       message: "A healthy baseline is required before deterministic upgrade verification can run.",
       steps: [
@@ -157,6 +160,7 @@ export function startUpgradeRun(
     packageName,
     currentVersion,
     targetVersion,
+    packageManager: input.packageManager,
     status: "running",
     outcome: null,
     message: "Running deterministic upgrade verification through TrueForge.",
@@ -338,6 +342,7 @@ function completedRun({
   packageName,
   currentVersion,
   targetVersion,
+  packageManager,
   outcome,
   message,
   steps
@@ -347,6 +352,7 @@ function completedRun({
   packageName: string;
   currentVersion: string;
   targetVersion: string;
+  packageManager: VerificationPackageManager;
   outcome: UpgradeRunOutcome;
   message: string;
   steps: UpgradeRunStep[];
@@ -358,6 +364,7 @@ function completedRun({
     packageName,
     currentVersion,
     targetVersion,
+    packageManager,
     status: "completed",
     outcome,
     message,
@@ -679,6 +686,7 @@ function sanitizeRecord(record: UpgradeRunRecord): UpgradeRunSnapshot {
     packageName: record.packageName,
     currentVersion: record.currentVersion,
     targetVersion: record.targetVersion,
+    packageManager: record.packageManager,
     status: record.status,
     outcome: record.outcome,
     message: record.message,
