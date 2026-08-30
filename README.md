@@ -1,25 +1,19 @@
 # UpgradePilot
 
-UpgradePilot is a developer workspace for verified dependency upgrades in public GitHub Node.js repositories.
+UpgradePilot helps developers upgrade dependencies with proof, not guesswork.
 
-It does more than identify outdated packages. UpgradePilot establishes a real baseline, applies an upgrade inside an isolated sandbox, runs the repository's own checks, and only reaches for an AI repair agent when execution proves the upgrade caused a compatibility failure.
+Give it a public GitHub Node.js repository, and it inspects the dependency inventory, checks what is outdated, establishes the current baseline, applies a selected upgrade in an isolated sandbox, and runs the repository's real verification commands. If the upgrade breaks the project, UpgradePilot can hand the failure evidence to a repair agent, apply a safe fix, re-run verification, and only prepare a pull request when the result is backed by execution evidence.
 
 ## Qodo Code Review Evidence
 
-Qodo is used as an independent review layer for UpgradePilot pull requests.
+Qodo acted as an independent code-review layer for UpgradePilot. The most useful reviews were not cosmetic; they caught trust-boundary, reliability, and maintainability issues that made the project stronger.
 
-Status: placeholder for review evidence. This section will be updated with representative Qodo-reviewed PRs, screenshots, and a short before/after summary of findings that improved the project.
+Highlights:
 
-Representative merged PR:
-
-- TODO: Add link to the strongest merged Qodo-reviewed PR.
-
-Planned evidence highlights:
-
-- Qodo findings triaged into fixed, deferred, or intentionally dismissed with rationale.
-- Follow-up hardening PRs created from valid review comments on earlier rapid-prototype PRs.
-- Screenshots or carousel showing Qodo comments and the resulting code/test/doc improvements.
-- Summary of how Qodo improved OSS readiness: tests, error handling, secret handling, deployment docs, and maintainability.
+- [PR #16](https://github.com/JAIVIGNESH2002/UpgradePilot/pull/16): made verified repairs trustworthy. Qodo caught cases where `unifiedDiff` repairs could be lost, new repair-created files were not handled in GitHub PR creation, and enrichment failures could silently produce partial PR contents.
+- [PR #17](https://github.com/JAIVIGNESH2002/UpgradePilot/pull/17): hardened repository inspection. Qodo flagged private-repository leakage risks, oversized GitHub responses, malformed API contracts, TrueForge timeout coverage, dependency inventory caps, and missing failure-mode tests.
+- [PR #18](https://github.com/JAIVIGNESH2002/UpgradePilot/pull/18): tightened TrueForge result parsing. Qodo caught marker-collision risks in command output, kept unrelated dependency-policy changes out of the PR, and found a `{ resultText }` wrapper contract mismatch.
+- [PR #19](https://github.com/JAIVIGNESH2002/UpgradePilot/pull/19): bounded run storage. Qodo pushed us to add TTL eviction, max-size retention, stale-running timeouts, active-run limits, stricter env parsing, and clearer full-gate verification evidence.
 
 ## What The Agent Does
 
