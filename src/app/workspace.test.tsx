@@ -892,6 +892,7 @@ function makeUpgradeRun({
     packageName: "react",
     currentVersion: "18.3.1",
     targetVersion: "19.0.0",
+    packageManager: "npm",
     status,
     outcome,
     message,

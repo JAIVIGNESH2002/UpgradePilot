@@ -1,4 +1,5 @@
 import type { SandboxProvider, SandboxWorkspace } from "@/lib/baseline";
+import { GitHubClient, parseGitHubRepositoryUrl } from "@/lib/github";
 import {
   buildNpmBaselineTurnPrompt,
   UPGRADEPILOT_BASELINE_RESULT_MARKER
@@ -552,14 +553,125 @@ export class TrueForgeClient {
       fileReplacements: repairPatch.fileReplacements,
       textReplacements: repairPatch.textReplacements
     });
+    const enrichedVerificationResult =
+      verificationResult.status === "VERIFIED"
+        ? await this.includeVerifiedRepairFiles({
+            repositoryUrl: input.repositoryUrl,
+            verificationResult,
+            repairPatch
+          })
+        : verificationResult;
 
     return {
       status: "completed",
       summary: repairPatch.summary,
       sessionId: session.data.id,
       turnId: turn.data.id,
-      verificationResult
+      verificationResult: enrichedVerificationResult
     };
+  }
+
+  private async includeVerifiedRepairFiles(input: {
+    repositoryUrl: string;
+    verificationResult: UpgradeVerificationResult;
+    repairPatch: RepairPatch;
+  }): Promise<UpgradeVerificationResult> {
+    const changedFiles = [...(input.verificationResult.changedFiles ?? [])];
+    const includedPaths = new Set(changedFiles.map((file) => file.path));
+
+    for (const replacement of input.repairPatch.fileReplacements) {
+      if (!includedPaths.has(replacement.path)) {
+        changedFiles.push({ path: replacement.path, content: replacement.content });
+        includedPaths.add(replacement.path);
+      }
+    }
+
+    const missingTextReplacementPaths = [
+      ...new Set(
+        input.repairPatch.textReplacements
+          .map((replacement) => replacement.path)
+          .filter((path) => !includedPaths.has(path))
+      )
+    ];
+    const missingUnifiedDiffPatches = input.repairPatch.unifiedDiff
+      ? parseUnifiedDiffFilePatches(input.repairPatch.unifiedDiff).filter(
+          (patch) => !includedPaths.has(patch.path)
+        )
+      : [];
+
+    if (missingTextReplacementPaths.length === 0 && missingUnifiedDiffPatches.length === 0) {
+      return { ...input.verificationResult, changedFiles };
+    }
+
+    const ref = parseGitHubRepositoryUrl(input.repositoryUrl);
+    const github = new GitHubClient({
+      token: process.env.GITHUB_TOKEN,
+      fetchImpl: this.fetchImpl
+    });
+    const metadata = await github.getRepositoryMetadata(ref);
+
+    for (const patch of missingUnifiedDiffPatches) {
+      try {
+        const originalContent =
+          patch.isNewFile === true
+            ? ""
+            : await github.getRepositoryFileText(ref, patch.path, metadata.defaultBranch);
+
+        if (originalContent === null) {
+          throw new TrueForgeIntegrationError(
+            `Verified repair touched ${patch.path}, but that file was not found in ${ref.owner}/${ref.name}.`
+          );
+        }
+
+        const repairedContent = applyUnifiedDiffPatch(originalContent, patch);
+        changedFiles.push({ path: patch.path, content: repairedContent });
+        includedPaths.add(patch.path);
+      } catch (error) {
+        throw describeRepairEnrichmentFailure({
+          repository: `${ref.owner}/${ref.name}`,
+          path: patch.path,
+          cause: error
+        });
+      }
+    }
+
+    for (const path of missingTextReplacementPaths) {
+      if (includedPaths.has(path)) {
+        continue;
+      }
+
+      try {
+        const originalContent = await github.getRepositoryFileText(
+          ref,
+          path,
+          metadata.defaultBranch
+        );
+
+        if (originalContent === null) {
+          throw new TrueForgeIntegrationError(
+            `Verified repair touched ${path}, but that file was not found in ${ref.owner}/${ref.name}.`
+          );
+        }
+
+        const repairedContent = applyRepairTextReplacements(
+          originalContent,
+          input.repairPatch.textReplacements.filter((replacement) => replacement.path === path)
+        );
+
+        if (repairedContent !== originalContent) {
+          changedFiles.push({ path, content: repairedContent });
+          includedPaths.add(path);
+        }
+      } catch (error) {
+        throw describeRepairEnrichmentFailure({
+          repository: `${ref.owner}/${ref.name}`,
+          path,
+          cause: error
+        });
+      }
+    }
+
+    return { ...input.verificationResult, changedFiles };
   }
 
   private async collectNpmUpgradeRepairContext(input: {
@@ -1163,12 +1275,7 @@ function buildUpgradeRepairHandoffPrompt(input: {
   });
 }
 
-function extractRepairPatch(turn: TurnResponse["data"]): {
-  summary: string;
-  unifiedDiff: string | null;
-  fileReplacements: RepairFileReplacement[];
-  textReplacements: RepairTextReplacement[];
-} {
+function extractRepairPatch(turn: TurnResponse["data"]): RepairPatch {
   if (turn.state.status !== "done") {
     return {
       summary: "TrueForge repair agent completed without a final response.",
@@ -1231,11 +1338,141 @@ type RepairFileReplacement = {
   content: string;
 };
 
+type RepairPatch = {
+  summary: string;
+  unifiedDiff: string | null;
+  fileReplacements: RepairFileReplacement[];
+  textReplacements: RepairTextReplacement[];
+};
+
 type RepairTextReplacement = {
   path: string;
   old_text: string;
   new_text: string;
 };
+
+type UnifiedDiffFilePatch = {
+  path: string;
+  isNewFile: boolean;
+  hunks: Array<{
+    oldStart: number;
+    lines: Array<{ type: "context" | "add" | "remove"; content: string }>;
+  }>;
+};
+
+function describeRepairEnrichmentFailure(input: {
+  repository: string;
+  path: string;
+  cause: unknown;
+}): TrueForgeIntegrationError {
+  const detail = input.cause instanceof Error ? input.cause.message : String(input.cause);
+
+  return new TrueForgeIntegrationError(
+    `Verified repair file enrichment failed for ${input.repository}:${input.path}. ${detail}`,
+    { cause: input.cause }
+  );
+}
+
+function parseUnifiedDiffFilePatches(diff: string): UnifiedDiffFilePatch[] {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  const patches: UnifiedDiffFilePatch[] = [];
+  let current: UnifiedDiffFilePatch | null = null;
+
+  for (const line of lines) {
+    const diffMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+
+    if (diffMatch) {
+      current = { path: diffMatch[2] ?? diffMatch[1] ?? "", isNewFile: false, hunks: [] };
+      patches.push(current);
+      continue;
+    }
+
+    if (current === null) {
+      continue;
+    }
+
+    if (line === "--- /dev/null") {
+      current.isNewFile = true;
+      continue;
+    }
+
+    const targetMatch = /^\+\+\+ b\/(.+)$/.exec(line);
+
+    if (targetMatch) {
+      current.path = targetMatch[1] ?? current.path;
+      continue;
+    }
+
+    if (line === "+++ /dev/null" || line.startsWith("Binary files ")) {
+      current.hunks = [];
+      current.path = "";
+      continue;
+    }
+
+    const hunkMatch = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(line);
+
+    if (hunkMatch) {
+      current.hunks.push({
+        oldStart: Number.parseInt(hunkMatch[1] ?? "1", 10),
+        lines: []
+      });
+      continue;
+    }
+
+    const hunk = current.hunks.at(-1);
+
+    if (!hunk || line === "\\ No newline at end of file") {
+      continue;
+    }
+
+    if (line.startsWith(" ")) {
+      hunk.lines.push({ type: "context", content: line.slice(1) });
+    } else if (line.startsWith("+")) {
+      hunk.lines.push({ type: "add", content: line.slice(1) });
+    } else if (line.startsWith("-")) {
+      hunk.lines.push({ type: "remove", content: line.slice(1) });
+    }
+  }
+
+  return patches.filter((patch) => patch.path !== "" && patch.hunks.length > 0);
+}
+
+function applyUnifiedDiffPatch(content: string, patch: UnifiedDiffFilePatch): string {
+  const hasTrailingNewline = content.endsWith("\n");
+  const originalLines = content === "" ? [] : content.replace(/\n$/, "").split("\n");
+  const output: string[] = [];
+  let cursor = 0;
+
+  for (const hunk of patch.hunks) {
+    const hunkStart = Math.max(hunk.oldStart - 1, 0);
+
+    output.push(...originalLines.slice(cursor, hunkStart));
+    cursor = hunkStart;
+
+    for (const line of hunk.lines) {
+      if (line.type === "add") {
+        output.push(line.content);
+        continue;
+      }
+
+      if (originalLines[cursor] !== line.content) {
+        throw new TrueForgeIntegrationError(
+          `Verified repair diff no longer applies cleanly to ${patch.path}.`
+        );
+      }
+
+      if (line.type === "context") {
+        output.push(line.content);
+      }
+
+      cursor += 1;
+    }
+  }
+
+  output.push(...originalLines.slice(cursor));
+
+  return output.join("\n") + (hasTrailingNewline || patch.isNewFile ? "\n" : "");
+}
 
 function parseRepairTextReplacements(value: unknown): RepairTextReplacement[] {
   if (!Array.isArray(value)) {
@@ -1260,6 +1497,25 @@ function parseRepairTextReplacements(value: unknown): RepairTextReplacement[] {
       return null;
     })
     .filter((item): item is RepairTextReplacement => item !== null);
+}
+
+function applyRepairTextReplacements(
+  content: string,
+  replacements: RepairTextReplacement[]
+): string {
+  let nextContent = content;
+
+  for (const replacement of replacements) {
+    const firstIndex = nextContent.indexOf(replacement.old_text);
+
+    if (firstIndex === -1 || nextContent.indexOf(replacement.old_text, firstIndex + 1) !== -1) {
+      continue;
+    }
+
+    nextContent = nextContent.replace(replacement.old_text, replacement.new_text);
+  }
+
+  return nextContent;
 }
 
 function parseRepairFileReplacements(value: unknown): RepairFileReplacement[] {
