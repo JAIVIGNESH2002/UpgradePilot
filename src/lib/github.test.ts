@@ -31,7 +31,8 @@ describe("GitHubClient", () => {
     const fetchImpl = async () =>
       Response.json({
         name: "widgets",
-        owner: { login: "acme" }, private: false,
+        owner: { login: "acme" },
+        private: false,
         html_url: "https://github.com/acme/widgets",
         description: "Useful widgets",
         default_branch: "main",
@@ -117,6 +118,34 @@ describe("GitHubClient", () => {
         "main"
       )
     ).rejects.toThrow("too large to inspect safely");
+  });
+
+  it("rejects and cancels streamed GitHub file bodies that exceed the byte limit", async () => {
+    let cancelled = false;
+    const oversizedStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    });
+    const client = new GitHubClient({
+      fetchImpl: (async () => new Response(oversizedStream)) as typeof fetch
+    });
+
+    await expect(
+      client.getRepositoryFileText(
+        {
+          owner: "acme",
+          name: "streamed-widgets",
+          url: "https://github.com/acme/streamed-widgets"
+        },
+        "package-lock.json",
+        "main"
+      )
+    ).rejects.toThrow("too large to inspect safely");
+    expect(cancelled).toBe(true);
   });
 
   it("caches successful public file reads for a short ttl", async () => {
@@ -236,7 +265,10 @@ describe("GitHubClient", () => {
 
       return new Response("not found", { status: 404 });
     });
-    const client = new GitHubClient({ token: "server-token", fetchImpl: fetchImpl as typeof fetch });
+    const client = new GitHubClient({
+      token: "server-token",
+      fetchImpl: fetchImpl as typeof fetch
+    });
 
     await client.createPullRequest({
       repositoryUrl: "https://github.com/acme/widgets",

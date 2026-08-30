@@ -135,6 +135,32 @@ describe("TrueForgeClient", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("applies the configured TrueForge request timeout", async () => {
+    vi.stubEnv("TRUEFORGE_REQUEST_TIMEOUT_MS", "5");
+    let observedAbortSignal = false;
+    const fetchImpl = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          observedAbortSignal = signal instanceof AbortSignal;
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The operation was aborted.", "AbortError")),
+            { once: true }
+          );
+        })
+    );
+    const client = new TrueForgeClient({
+      baseUrl: "http://trueforge.test",
+      fetchImpl: fetchImpl as typeof fetch
+    });
+
+    await expect(client.getHealth()).rejects.toThrow(
+      "The UpgradePilot server could not fetch data from TrueForge"
+    );
+    expect(observedAbortSignal).toBe(true);
+  });
+
   it("creates a constrained repair turn, applies the patch, and verifies again", async () => {
     vi.stubEnv("TRUEFORGE_REPAIR_MIN_INTERVAL_MS", "0");
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
@@ -174,8 +200,7 @@ describe("TrueForgeClient", () => {
       }
 
       if (
-        href ===
-        "https://api.github.com/repos/acme/demo/contents/src/lib/validation.ts?ref=main"
+        href === "https://api.github.com/repos/acme/demo/contents/src/lib/validation.ts?ref=main"
       ) {
         return new Response("export const schema = z.string({ required_error: 'Required' });\n");
       }
@@ -420,7 +445,9 @@ describe("TrueForgeClient", () => {
                 overallStatus: "PASSED",
                 upgradeStatus: "VERIFIED",
                 upgrade: { modelRepairRequired: false, runtimeChangeRequired: false },
-                commands: [{ command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }]
+                commands: [
+                  { command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }
+                ]
               }),
               "UPGRADEPILOT_UPGRADE_RESULT_END"
             ].join("\n"),
@@ -443,8 +470,7 @@ describe("TrueForgeClient", () => {
       }
 
       if (
-        href ===
-        "https://api.github.com/repos/acme/demo/contents/src/lib/validation.ts?ref=main"
+        href === "https://api.github.com/repos/acme/demo/contents/src/lib/validation.ts?ref=main"
       ) {
         return new Response("export const schema = z.string();\n");
       }
@@ -540,7 +566,9 @@ describe("TrueForgeClient", () => {
                 overallStatus: "PASSED",
                 upgradeStatus: "VERIFIED",
                 upgrade: { modelRepairRequired: false, runtimeChangeRequired: false },
-                commands: [{ command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }]
+                commands: [
+                  { command: "npm run typecheck", exitCode: 0, durationMs: 3, output: "ok" }
+                ]
               }),
               "UPGRADEPILOT_UPGRADE_RESULT_END"
             ].join("\n"),
@@ -577,7 +605,9 @@ describe("TrueForgeClient", () => {
         targetVersion: "4.4.3",
         verificationResult: {
           status: "FAILED",
-          commands: [{ command: "npm run typecheck", exitCode: 1, durationMs: 20, output: "failed" }],
+          commands: [
+            { command: "npm run typecheck", exitCode: 1, durationMs: 20, output: "failed" }
+          ],
           skippedScripts: [],
           modelRepairRequired: true,
           runtimeChangeRequired: false,
