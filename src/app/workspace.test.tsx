@@ -242,6 +242,231 @@ describe("RepositoryWorkspace", () => {
         selectedRepositoryId: repository.id
       })
     );
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json({
+          run: {
+            id: "run-1",
+            repositoryUrl: "https://github.com/acme/widgets",
+            status: "completed",
+            baseline: {
+              status: "healthy",
+              updatedAt: "2026-08-28T10:00:00Z",
+              commands: 2,
+              message: null,
+              steps: makeBaselineSteps()
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            run: makeUpgradeRun({ status: "completed" })
+          },
+          { status: 202 }
+        )
+      );
+    render(<RepositoryWorkspace />);
+
+    await screen.findByRole("heading", { name: "widgets" });
+    fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
+
+    expect(await screen.findByRole("heading", { name: "react" })).toBeVisible();
+    expect(screen.getByText("Upgrade run")).toBeVisible();
+    expect(
+      screen.getAllByText(
+        (_, element) => element?.textContent?.includes("18.3.1 to 19.0.0") ?? false
+      ).length
+    ).toBeGreaterThan(0);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/repositories/baseline/runs",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ repositoryUrl: "https://github.com/acme/widgets" })
+      })
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/repositories/upgrade-runs",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"packageName":"react"')
+      })
+    );
+  });
+
+  it("starts Verify Upgrade directly when baseline is already healthy", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      Response.json(
+        {
+          run: makeUpgradeRun({ status: "completed" })
+        },
+        { status: 202 }
+      )
+    );
+    render(<RepositoryWorkspace />);
+
+    await screen.findByRole("heading", { name: "widgets" });
+    fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
+
+    expect(await screen.findByRole("heading", { name: "react" })).toBeVisible();
+    expect(screen.getByText("Install target dependency")).toBeVisible();
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/repositories/baseline/runs",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("shows upgrade run polling progress", async () => {
+    vi.useFakeTimers();
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            run: makeUpgradeRun()
+          },
+          { status: 202 }
+        )
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          run: {
+            ...makeUpgradeRun(),
+            steps: [
+              { ...makeUpgradeRun().steps[0], status: "passed" },
+              { ...makeUpgradeRun().steps[1], status: "running" },
+              ...makeUpgradeRun().steps.slice(2)
+            ]
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          run: {
+            ...makeUpgradeRun(),
+            status: "completed",
+            outcome: "repair_failed",
+            message:
+              "Upgrade changed CI behavior and the repair cycle did not produce a verified result.",
+            updatedAt: "2026-08-28T10:01:00Z",
+            steps: makeUpgradeRun().steps.map((step, index) => ({
+              ...step,
+              status: index === 5 ? "skipped" : "passed"
+            }))
+          }
+        })
+      );
+
+    render(<RepositoryWorkspace />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByRole("heading", { name: "widgets" })).toBeVisible();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByText("Create sandbox")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(fetch).toHaveBeenCalledWith("/api/repositories/upgrade-runs/status?runId=upgrade-1");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByText("Repair failed")).toBeVisible();
+
+    vi.useRealTimers();
+  });
+
+  it("returns from an upgrade run to the repository detail", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    repository.baseline = {
+      status: "healthy",
+      updatedAt: "2026-08-28T10:00:00Z",
+      commands: 2,
+      message: null,
+      steps: makeBaselineSteps()
+    };
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      Response.json({ run: makeUpgradeRun({ status: "completed" }) }, { status: 200 })
+    );
+    render(<RepositoryWorkspace />);
+
+    await screen.findByRole("heading", { name: "widgets" });
+    fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
+    expect(await screen.findByText("Upgrade run")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to repository" }));
+
+    expect(await screen.findByRole("heading", { name: "widgets" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Dependencies" })).toBeVisible();
+    expect(screen.getByText("Verified upgrade")).toBeVisible();
+  });
+
+  it("keeps Verify Upgrade on the repository page when baseline fails", async () => {
+    const repository = workspaceRepositoryFromInspection(
+      makeRepositoryInspection("acme", "widgets"),
+      makeDependencyVersions()
+    );
+    window.localStorage.setItem(
+      REPOSITORY_WORKSPACE_STORAGE_KEY,
+      serializeRepositoryWorkspaceSnapshot({
+        repositories: [repository],
+        selectedRepositoryId: repository.id
+      })
+    );
     vi.mocked(fetch).mockResolvedValueOnce(
       Response.json({
         run: {
@@ -249,11 +474,11 @@ describe("RepositoryWorkspace", () => {
           repositoryUrl: "https://github.com/acme/widgets",
           status: "completed",
           baseline: {
-            status: "healthy",
+            status: "failed",
             updatedAt: "2026-08-28T10:00:00Z",
-            commands: 2,
-            message: null,
-            steps: makeBaselineSteps()
+            commands: 1,
+            message: "npm ci failed",
+            steps: [{ ...makeBaselineSteps()[0], status: "failed", output: "npm ci failed" }]
           }
         }
       })
@@ -263,15 +488,11 @@ describe("RepositoryWorkspace", () => {
     await screen.findByRole("heading", { name: "widgets" });
     fireEvent.click(screen.getByRole("button", { name: "Verify upgrade" }));
 
-    expect(await screen.findByText("Baseline: Healthy")).toBeVisible();
-    expect(screen.getByText("react can open an upgrade run targeting 19.0.0.")).toBeVisible();
-    expect(fetch).toHaveBeenCalledWith(
-      "/api/repositories/baseline/runs",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ repositoryUrl: "https://github.com/acme/widgets" })
-      })
-    );
+    expect(await screen.findByText("Baseline: Failed")).toBeVisible();
+    expect(
+      screen.getByText("A healthy baseline is required before opening an upgrade run.")
+    ).toBeVisible();
+    expect(screen.queryByText("Upgrade run")).not.toBeInTheDocument();
   });
 
   it("polls baseline runs and updates one active step at a time", async () => {
@@ -610,4 +831,68 @@ function makeBaselineSteps(): WorkspaceBaselineStep[] {
       output: "2 passed"
     }
   ];
+}
+
+function makeUpgradeRun({ status = "running" }: { status?: "running" | "completed" } = {}) {
+  return {
+    id: "upgrade-1",
+    repositoryUrl: "https://github.com/acme/widgets",
+    packageName: "react",
+    currentVersion: "18.3.1",
+    targetVersion: "19.0.0",
+    status,
+    outcome: status === "completed" ? "verified" : null,
+    message: "Preparing deterministic upgrade verification.",
+    startedAt: "2026-08-28T10:00:00Z",
+    updatedAt: status === "completed" ? "2026-08-28T10:01:00Z" : null,
+    changedFiles:
+      status === "completed"
+        ? [{ path: "package.json", content: "{\"dependencies\":{\"react\":\"19.0.0\"}}\n" }]
+        : [],
+    pullRequest: null,
+    steps: [
+      {
+        name: "Check baseline",
+        command: null,
+        status: "running",
+        durationMs: null,
+        output: null
+      },
+      {
+        name: "Create sandbox",
+        command: "TrueForge deterministic sandbox",
+        status: "pending",
+        durationMs: null,
+        output: null
+      },
+      {
+        name: "Clone repository",
+        command: "git clone <public repository>",
+        status: "pending",
+        durationMs: null,
+        output: null
+      },
+      {
+        name: "Install target dependency",
+        command: "npm install react@19.0.0 --package-lock-only",
+        status: "pending",
+        durationMs: null,
+        output: null
+      },
+      {
+        name: "Run verification",
+        command: "npm ci && npm run available checks",
+        status: "pending",
+        durationMs: null,
+        output: null
+      },
+      {
+        name: "Repair and re-verify",
+        command: "TrueForge repair agent + deterministic verification",
+        status: "pending",
+        durationMs: null,
+        output: null
+      }
+    ]
+  } as const;
 }
